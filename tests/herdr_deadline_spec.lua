@@ -162,7 +162,7 @@ describe("agent-poke.herdr poke() total blocking time", function()
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   it("remembered pane: list + prompt together block at most TIMEOUT_MS", function()

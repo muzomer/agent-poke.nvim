@@ -179,7 +179,7 @@ describe("agent-poke.herdr", function()
       cb(picked)
     end
 
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
     herdr = require("agent-poke.herdr")
@@ -208,7 +208,7 @@ describe("agent-poke.herdr", function()
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function prompts()

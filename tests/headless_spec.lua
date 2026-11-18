@@ -138,7 +138,7 @@ describe("agent-poke.headless", function()
       notes[#notes + 1] = { msg = tostring(msg), level = level }
     end
     roots = {}
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
     package.loaded["agent-poke.state"] = nil
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")

@@ -132,7 +132,7 @@ describe("agent-poke.headless session cwd", function()
       notes[#notes + 1] = { msg = tostring(msg), level = level }
     end
     roots = {}
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
     package.loaded["agent-poke.state"] = nil
     package.loaded["agent-poke.headless"] = nil
     state = require("agent-poke.state")
@@ -151,7 +151,7 @@ describe("agent-poke.headless session cwd", function()
     fake.restore()
     vim.notify = old_notify
     vim.env.XDG_STATE_HOME = old_state_home
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function root()

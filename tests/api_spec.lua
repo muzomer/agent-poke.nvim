@@ -173,7 +173,7 @@ describe("agent-poke public API", function()
 
     first_win = vim.api.nvim_get_current_win()
     ap = require("agent-poke")
-    ap.setup()
+    ap.config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
   end)
@@ -219,7 +219,7 @@ describe("agent-poke public API", function()
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function wait_for(what, cond)

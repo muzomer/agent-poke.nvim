@@ -49,11 +49,15 @@ describe("agent-poke setup()", function()
     assert.are.same(false, ap.config.isolate)
   end)
 
-  it("a second setup() starts again from the defaults", function()
+  -- agent-poke_nvim-ei4.1: a second setup() merges into the current config
+  it("a second setup() deep-merges into the current config", function()
     local ap = fresh()
     ap.setup({ headless = { agent = "codex", permission_mode = "acceptEdits" } })
     ap.setup({ isolate = false })
-    assert.are.same(HEADLESS_DEFAULTS, ap.config.headless)
+    local want = vim.deepcopy(HEADLESS_DEFAULTS)
+    want.agent = "codex"
+    want.permission_mode = "acceptEdits"
+    assert.are.same(want, ap.config.headless)
     assert.are.same(false, ap.config.isolate)
   end)
 

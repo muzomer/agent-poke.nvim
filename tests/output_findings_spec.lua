@@ -114,7 +114,7 @@ describe("output window (review findings)", function()
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function wait_for(what, cond)

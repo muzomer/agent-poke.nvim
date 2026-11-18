@@ -384,9 +384,22 @@ M.spawn = function(args, cwd, on_line, on_exit, env)
   }
 end
 
+local MAX_QUEUED = 10 -- waiting pokes per root; the oldest is dropped beyond that
+
 local start -- forward: queued pokes start again from the exit handler
 
-start = function(root, text, retried, fork, o)
+---Start the oldest of `queue` (a list of { text, fork, opts }); the rest waits on that run.
+---A prompt that cannot start is skipped.
+local function start_next(root, queue)
+  while #queue > 0 do
+    local q = table.remove(queue, 1)
+    if start(root, q.text, nil, q.fork, q.opts, queue) then
+      return
+    end
+  end
+end
+
+start = function(root, text, retried, fork, o, queue)
   o = o or {}
   local a = M.adapter(fork and fork.agent) or M.adapter()
   local saved = not fork and M.session_id(root) or nil
@@ -403,7 +416,7 @@ start = function(root, text, retried, fork, o)
       return nil
     end
   end
-  local run = { status = "working", text = text, fork = fork, lines = {} }
+  local run = { status = "working", text = text, fork = fork, lines = {}, queue = queue or {} }
   runs[root] = run
   push(run, { string.format("● %s · %s", a.name, one_line(text, 80)) })
   local partial -- text streamed in pieces (delta events), shown as it grows
@@ -478,29 +491,19 @@ start = function(root, text, retried, fork, o)
         if not fok then
           run.status, run.error = "failed", one_line(tostring(ferr), 200)
           notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
-          local q = run.queued
-          if q then
-            start(root, q, nil, run.queued_fork, run.queued_opts)
-          end
+          start_next(root, run.queue)
           return
         end
-        local again = start(root, text, true, nil, vim.tbl_extend("force", o, { on_start = false }))
-        if again then
-          again.queued = run.queued -- a poke that waited for this run still waits
-          again.queued_fork = run.queued_fork
-          again.queued_opts = run.queued_opts
-        elseif run.queued then
-          start(root, run.queued, nil, run.queued_fork, run.queued_opts)
+        -- pokes that waited for this run still wait, on the new one
+        if not start(root, text, true, nil, vim.tbl_extend("force", o, { on_start = false }), run.queue) then
+          start_next(root, run.queue)
         end
         return
       end
       run.status, run.error = "failed", one_line(err, 200)
       notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
     end
-    local q = run.queued
-    if q then
-      start(root, q, nil, run.queued_fork, run.queued_opts)
-    end
+    start_next(root, run.queue)
   end
   local function on_exit(code, stderr, signal)
     local ok, err = pcall(on_exit_unsafe, code, stderr, signal)
@@ -550,12 +553,13 @@ function M.poke(root, text, opts)
   end
   local run = runs[root]
   if run and run.status == "working" then
-    if run.queued then
-      notify("replacing the queued prompt with the latest one")
-    else
+    if #run.queue >= MAX_QUEUED then
+      table.remove(run.queue, 1)
+      notify(string.format("%d prompts are already waiting; dropped the oldest", MAX_QUEUED))
+    elseif #run.queue == 0 then
       notify("the agent is still working; your prompt runs when it is done")
     end
-    run.queued, run.queued_fork, run.queued_opts = text, fork, opts
+    run.queue[#run.queue + 1] = { text = text, fork = fork, opts = opts }
     return false, "queued"
   end
   local started = start(root, text, nil, fork, opts) ~= nil
@@ -618,8 +622,13 @@ function M.stop(root)
     if run.handle then
       run.handle.kill()
     end
-    if run.queued then
-      notify("stopped; the queued prompt was cancelled", vim.log.levels.WARN)
+    if #run.queue > 0 then
+      local texts = {}
+      for _, q in ipairs(run.queue) do
+        texts[#texts + 1] = '"' .. one_line(q.text, 40) .. '"'
+      end
+      notify(string.format("stopped; %d queued prompt(s) cancelled: %s", #run.queue, table.concat(texts, ", ")),
+        vim.log.levels.WARN)
     end
     return true
   end

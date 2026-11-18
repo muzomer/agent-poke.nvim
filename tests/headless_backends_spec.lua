@@ -124,7 +124,7 @@ describe("agent-poke.headless backends", function()
 
   after_each(function()
     fake.restore()
-    ap.setup({})
+    ap.config = require("agent-poke.defaults")()
     vim.notify = old_notify
     vim.env.XDG_STATE_HOME = old_state_home
   end)

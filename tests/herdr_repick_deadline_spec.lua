@@ -158,7 +158,7 @@ describe("agent-poke.herdr re-pick when the remembered pane is gone (agent = her
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").setup()
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   it("at most TIMEOUT_MS before the picker opens, and it offers the listed agents", function()

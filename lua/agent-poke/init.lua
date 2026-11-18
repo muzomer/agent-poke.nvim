@@ -1,26 +1,24 @@
 local M = {}
 
----Defaults, as in code-review.nvim.
-local function defaults()
-  return {
-    agent = "auto", -- who gets poked: "auto" (a herdr agent you pick, else the background agent), "herdr", "headless"
-    isolate = "fork", -- keep the work out of a herdr agent's session: "fork", "subagent", or false (typed in as is)
-    headless = { -- the background agent: one resumable conversation
-      agent = "claude", -- "claude", "codex", "opencode" or "gemini"
-      cmd = nil, -- its executable (default: the agent's own)
-      allowed_tools = nil, -- claude: replaces the default tool list
-      extra_tools = {}, -- claude: rules added to the default list
-      permission_mode = nil, -- claude: --permission-mode; codex: --sandbox; gemini: --approval-mode
-      args = {}, -- extra arguments for every run
-    },
-  }
-end
+local defaults = require("agent-poke.defaults")
 
 M.config = defaults()
 
+local KNOWN_AGENTS = { claude = true, codex = true, opencode = true, gemini = true }
+
 ---@param opts? table
 function M.setup(opts)
-  M.config = vim.tbl_deep_extend("force", defaults(), vim.deepcopy(opts or {}))
+  opts = vim.deepcopy(opts or {})
+  local agent = type(opts.headless) == "table" and opts.headless.agent
+  if agent ~= nil and agent ~= false and not KNOWN_AGENTS[agent] then
+    vim.notify(
+      string.format('agent-poke: unknown headless.agent "%s" (use claude, codex, opencode or gemini); keeping "%s"',
+        tostring(agent), tostring(M.config.headless.agent)),
+      vim.log.levels.ERROR
+    )
+    opts.headless.agent = nil
+  end
+  M.config = vim.tbl_deep_extend("force", M.config, opts)
   return M.config
 end
 

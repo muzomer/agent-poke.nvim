@@ -29,7 +29,7 @@ describe("agent-poke.headless poke while a chat is open", function()
     roots, spawns, chat_wins = {}, {}, {}
     package.loaded["agent-poke.state"] = nil
     package.loaded["agent-poke.headless"] = nil
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
     old_spawn = headless.spawn
@@ -67,7 +67,7 @@ describe("agent-poke.headless poke while a chat is open", function()
     vim.notify = old_notify
     fakes.restore()
     vim.env.XDG_STATE_HOME = old_state_home
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function root()

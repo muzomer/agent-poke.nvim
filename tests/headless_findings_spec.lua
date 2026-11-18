@@ -49,7 +49,7 @@ describe("agent-poke.headless review findings", function()
     headless.spawn = old_spawn
     vim.notify = old_notify
     vim.env.XDG_STATE_HOME = old_state_home
-    require("agent-poke").setup({})
+    require("agent-poke").config = require("agent-poke.defaults")()
   end)
 
   local function root()
