@@ -33,11 +33,15 @@ agents.claude = {
   name = "Claude Code",
   cmd = "claude",
   preset_id = true,
+  fork = true, -- a session can be copied
+  subagents = true, -- the agent can hand work to a subagent (prompt wording)
   DEFAULT_TOOLS = { "Read", "Grep", "Glob" },
   args = function(o)
     local c = o.cfg
     local args = { o.cmd, "-p", o.prompt, "--output-format", "stream-json", "--verbose" }
-    if o.resume then
+    if o.fork then
+      vim.list_extend(args, { "--resume", o.fork, "--fork-session" })
+    elseif o.resume then
       vim.list_extend(args, { "--resume", o.resume })
     else
       vim.list_extend(args, { "--session-id", o.new_id })
@@ -90,10 +94,15 @@ agents.codex = {
 agents.opencode = {
   name = "OpenCode",
   cmd = "opencode",
+  fork = true,
   args = function(o)
     local args = { o.cmd, "run", "--format", "json" }
-    if o.resume then
-      vim.list_extend(args, { "--session", o.resume })
+    local session = o.fork or o.resume
+    if session then
+      vim.list_extend(args, { "--session", session })
+    end
+    if o.fork then
+      args[#args + 1] = "--fork"
     end
     if o.cfg.permission_mode == "auto" then
       args[#args + 1] = "--auto"
@@ -140,9 +149,19 @@ local function agent_name()
   return cfg().agent or "claude"
 end
 
----The adapter of the configured background agent.
-function M.adapter()
-  return agents[agent_name()] or agents.claude
+---The adapter of the configured background agent (or of `name`, e.g. the agent of a session to fork).
+function M.adapter(name)
+  return agents[name or agent_name()] or (not name and agents.claude) or nil
+end
+
+---Is the executable of the background agent (or of `name`) installed?
+function M.available(name)
+  local a = M.adapter(name)
+  if not a then
+    return false
+  end
+  local cmd = (not name or name == agent_name()) and M.command() or a.cmd
+  return vim.fn.executable(cmd) == 1
 end
 
 ---Its executable: config.headless.cmd, else the adapter's own.
@@ -183,12 +202,21 @@ local function uuid()
   return string.format("%s-%s-%s-%s-%s", h:sub(1, 8), h:sub(9, 12), h:sub(13, 16), h:sub(17, 20), h:sub(21, 32))
 end
 
----Command line of a run. `resume` = id of the session to continue, `new_id` = id for a new one.
+---Command line of a run. `resume` = id of the session to continue, `new_id` = id for a new one,
+---`fork` = id of a session to copy (run by `agent`, in `cwd`).
 function M.args(root, text, opts)
-  local args = M.adapter().args({
-    cmd = M.command(), prompt = text, cwd = root, cfg = cfg(), new_id = opts.new_id, resume = opts.resume,
+  -- one adapter builds the line: a foreign agent (a fork) gets its own adapter,
+  -- executable and no settings of the configured agent
+  local foreign = opts.agent and opts.agent ~= agent_name()
+  local adapter = M.adapter(opts.agent)
+  local args = adapter.args({
+    cmd = foreign and adapter.cmd or M.command(),
+    prompt = text, cwd = opts.cwd or root, cfg = foreign and {} or cfg(),
+    new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
   })
-  vim.list_extend(args, cfg().args or {})
+  if not foreign then
+    vim.list_extend(args, cfg().args or {})
+  end
   return args
 end
 
@@ -238,10 +266,10 @@ end
 
 local start -- forward: queued pokes start again from the exit handler
 
-start = function(root, text, retried)
-  local a = M.adapter()
-  local saved = M.session_id(root)
-  local new_id = not saved and a.preset_id and uuid() or nil
+start = function(root, text, retried, fork)
+  local a = M.adapter(fork and fork.agent) or M.adapter()
+  local saved = not fork and M.session_id(root) or nil
+  local new_id = not fork and not saved and a.preset_id and uuid() or nil
   if new_id then
     local ok, err = pcall(save_session_id, root, new_id) -- before the run, so a second poke resumes it
     if not ok then
@@ -249,7 +277,7 @@ start = function(root, text, retried)
       return nil
     end
   end
-  local run = { status = "working", text = text }
+  local run = { status = "working", text = text, fork = fork }
   runs[root] = run
   local function on_line(line)
     local ok, event = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
@@ -257,7 +285,7 @@ start = function(root, text, retried)
       return
     end
     local r = a.parse(event) or {}
-    if r.session_id and not saved and not new_id and r.session_id ~= M.session_id(root) then
+    if r.session_id and not fork and not saved and not new_id and r.session_id ~= M.session_id(root) then
       local sok, serr = pcall(save_session_id, root, r.session_id) -- agents that pick their own id
       if not sok then
         notify("could not store the session id: " .. one_line(serr, 200), vim.log.levels.ERROR)
@@ -294,15 +322,16 @@ start = function(root, text, retried)
           notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
           local q = run.queued
           if q then
-            start(root, q)
+            start(root, q, nil, run.queued_fork)
           end
           return
         end
         local again = start(root, text, true)
         if again then
           again.queued = run.queued -- a poke that waited for this run still waits
+          again.queued_fork = run.queued_fork
         elseif run.queued then
-          start(root, run.queued)
+          start(root, run.queued, nil, run.queued_fork)
         end
         return
       end
@@ -311,7 +340,7 @@ start = function(root, text, retried)
     end
     local q = run.queued
     if q then
-      start(root, q)
+      start(root, q, nil, run.queued_fork)
     end
   end
   local function on_exit(code, stderr, signal)
@@ -324,7 +353,9 @@ start = function(root, text, retried)
     end
   end
   local spawned, handle = pcall(function()
-    return M.spawn(M.args(root, text, { resume = saved, new_id = new_id }), root, on_line, on_exit)
+    return M.spawn(M.args(root, text, {
+      resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent, cwd = fork and fork.cwd,
+    }), fork and fork.cwd or root, on_line, on_exit)
   end)
   if not spawned then -- vim.system throws when the command or its directory is missing
     if new_id then
@@ -340,7 +371,9 @@ end
 
 ---Send `text` to this root's background agent, starting or resuming it.
 ---@return boolean started false when the poke was queued or could not start
-function M.poke(root, text)
+---@param opts? { fork?: { id: string, cwd: string, agent?: string } } run a throwaway fork of that session
+function M.poke(root, text, opts)
+  local fork = opts and opts.fork
   local run = runs[root]
   if run and run.status == "working" then
     if run.queued then
@@ -348,10 +381,10 @@ function M.poke(root, text)
     else
       notify("the agent is still working; your prompt runs when it is done")
     end
-    run.queued = text
+    run.queued, run.queued_fork = text, fork
     return false
   end
-  return start(root, text) ~= nil
+  return start(root, text, nil, fork) ~= nil
 end
 
 ---Stop the running process of this root (the session is kept). A queued prompt
