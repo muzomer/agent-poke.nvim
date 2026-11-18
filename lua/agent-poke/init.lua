@@ -24,4 +24,31 @@ function M.setup(opts)
   return M.config
 end
 
+---Poke root's agent with `prompt`: the picked herdr pane, else the background agent.
+function M.poke(root, prompt)
+  require("agent-poke.herdr").poke(root, prompt)
+end
+
+---Choose root's agent (herdr panes and the background agent).
+function M.pick(root, on_pick)
+  require("agent-poke.herdr").pick(root, on_pick)
+end
+
+---Toggle a window following root's current/last background run.
+function M.output(root)
+  require("agent-poke.output").toggle(root)
+end
+
+---Open root's background session interactively in a terminal.
+function M.chat(root)
+  require("agent-poke.headless").chat(root)
+end
+
+---Stop root's background run.
+function M.stop(root)
+  if not require("agent-poke.headless").stop(root) then
+    vim.notify("agent-poke: no background run to stop", vim.log.levels.INFO)
+  end
+end
+
 return M
