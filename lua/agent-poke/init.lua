@@ -25,8 +25,20 @@ function M.setup(opts)
 end
 
 ---Poke root's agent with `prompt`: the picked herdr pane, else the background agent.
-function M.poke(root, prompt)
-  require("agent-poke.herdr").poke(root, prompt)
+---opts: { cwd?, dirs?, env?, on_start?, pick? }.
+---@return "started"|"queued"|"typed"|"forked"|false
+function M.poke(root, prompt, opts)
+  return require("agent-poke.herdr").poke(root, prompt, opts)
+end
+
+---State of root's background run: nil before any, else { status = "working"|"done"|"failed", error? }.
+function M.status(root)
+  return require("agent-poke.headless").status(root)
+end
+
+---Readable output lines of root's current/last background run.
+function M.lines(root)
+  return require("agent-poke.headless").lines(root)
 end
 
 ---Choose root's agent (herdr panes and the background agent).

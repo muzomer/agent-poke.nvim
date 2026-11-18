@@ -40,19 +40,29 @@ local function failure(res)
   return out ~= "" and out or ("herdr exited with " .. tostring(res.code))
 end
 
----Run herdr without blocking Neovim: `cb(result)` runs on the main loop, once,
----also when herdr is not installed or does not answer in time.
-local function run_async(args, cb)
-  local ok, err = pcall(vim.system, args, { text = true, timeout = M.TIMEOUT_MS }, function(res)
-    vim.schedule(function()
-      cb(res)
-    end)
+---Run herdr and wait for it (at most TIMEOUT_MS): its result, also when herdr
+---is not installed or does not answer in time. poke() returns its status
+---synchronously, so these calls are short and bounded.
+---A deadline (ms, monotonic clock) for all the synchronous calls of one step.
+local function new_deadline()
+  return vim.uv.hrtime() / 1e6 + M.TIMEOUT_MS
+end
+
+---`deadline` is shared by the calls of one poke step, so that together they
+---block for at most TIMEOUT_MS, not TIMEOUT_MS each.
+local function run_sync(args, deadline)
+  deadline = deadline or new_deadline()
+  local left = math.floor(deadline - vim.uv.hrtime() / 1e6)
+  if left < 1 then
+    return { code = 124, stdout = "", stderr = "" }
+  end
+  local ok, res = pcall(function()
+    return vim.system(args, { text = true, timeout = left }):wait(left + 2000)
   end)
   if not ok then
-    vim.schedule(function()
-      cb({ code = -1, stdout = "", stderr = tostring(err) })
-    end)
+    return { code = -1, stdout = "", stderr = tostring(res) }
   end
+  return res
 end
 
 ---Decode the JSON herdr prints. Errors come as {"error": {code, message}} and
@@ -110,10 +120,8 @@ local function agent_list(res)
   return list
 end
 
-local function list_agents(cb)
-  run_async({ "herdr", "agent", "list" }, function(res)
-    cb(agent_list(res))
-  end)
+local function list_agents(deadline)
+  return agent_list(run_sync({ "herdr", "agent", "list" }, deadline))
 end
 
 -- Sessions of herdr panes ------------------------------------------------------
@@ -235,31 +243,43 @@ end
 ---Let the user choose the agent to poke for `root`: the agents running in herdr
 ---(this pane left out) plus the background agent. The choice is remembered per root.
 ---@param on_pick? fun(target: table) called with the choice
-function M.pick(root, on_pick)
+---@param listed? table[] agents the caller has just listed: not listed again
+function M.pick(root, on_pick, listed)
   if not M.available() then
     return offer(root, {}, on_pick)
   end
-  list_agents(function(agents, err)
-    if not agents then
-      notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
-      agents = {}
-    end
-    offer(root, agents, on_pick, err)
-  end)
+  local agents, err = listed, nil
+  if not agents then
+    agents, err = list_agents()
+  end
+  if not agents then
+    notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
+    agents = {}
+  end
+  offer(root, agents, on_pick, err)
 end
 
 -- Sending ------------------------------------------------------------------------------
 
-local function background(root, prompt, fork)
+---@return "started"|"queued"|"forked"|false
+local function background(root, prompt, fork, opts)
   if not headless.available() and not fork then
-    return notify(headless.command() .. " not found; set config.headless.cmd", vim.log.levels.ERROR)
+    notify(headless.command() .. " not found; set config.headless.cmd", vim.log.levels.ERROR)
+    return false
   end
-  headless.poke(root, prompt, fork and { fork = fork } or nil)
+  local o = vim.tbl_extend("force", {}, opts or {})
+  o.fork = fork
+  local _, status = headless.poke(root, prompt, o)
+  if fork and status == "started" then
+    return "forked"
+  end
+  return status or false
 end
 
 ---Deliver `prompt` to a live herdr agent: a throwaway fork of its session when
 ---isolate = "fork" and it can fork, else typed into its pane.
-local function deliver(root, prompt, target)
+---@return "typed"|"forked"|"queued"|false
+local function deliver(root, prompt, target, opts, deadline)
   local isolate = config().isolate
   if isolate == nil then
     isolate = "fork"
@@ -270,7 +290,7 @@ local function deliver(root, prompt, target)
     local fork = M.session_of(target)
     if fork then
       notify("poked " .. target.title .. " (fork)")
-      return background(root, M.STYLE.fork .. "\n\n" .. prompt, fork)
+      return background(root, M.STYLE.fork .. "\n\n" .. prompt, fork, opts)
     end
     notify(string.format("could not find the session of %s to fork; typing the prompt into its pane instead", target.title),
       vim.log.levels.WARN)
@@ -279,75 +299,77 @@ local function deliver(root, prompt, target)
   if isolate and adapter and adapter.subagents then
     text = prompt .. "\n\n" .. M.STYLE.subagent
   end
-  run_async({ "herdr", "agent", "prompt", target.pane_id, text }, function(res)
-    local result, err = decode(res)
-    if result then
-      notify("poked " .. target.title)
+  local result, err = decode(run_sync({ "herdr", "agent", "prompt", target.pane_id, text }, deadline))
+  if result then
+    notify("poked " .. target.title)
+    return "typed"
+  end
+  notify(string.format("could not poke %s: %s", target.title, tostring(err)), vim.log.levels.ERROR)
+  return false
+end
+
+---Choose an agent now and deliver to it. Returns the status when the choice is
+---made at once; false while a picker is still open.
+local function pick_and_deliver(root, prompt, opts, listed)
+  local result = false
+  M.pick(root, function(target)
+    if target.pane_id == M.HEADLESS then
+      result = background(root, prompt, nil, opts)
     else
-      notify(string.format("could not poke %s: %s", target.title, tostring(err)), vim.log.levels.ERROR)
+      -- the picker listed the agents just now: no second list; the time
+      -- from the choice on has a deadline of its own
+      result = deliver(root, prompt, target, opts, new_deadline())
     end
-  end)
+  end, listed)
+  return result
+end
+
+local function poke_unsafe(root, prompt, opts)
+  local mode = config().agent or "auto"
+  if mode == "headless" or (mode == "auto" and not M.available()) then
+    return background(root, prompt, nil, opts)
+  end
+  if not M.available() then
+    notify("herdr is not running here (config.agent = \"herdr\")", vim.log.levels.ERROR)
+    return false
+  end
+  local saved = not opts.pick and state.get(root).target or nil
+  if type(saved) ~= "table" or not saved.pane_id then
+    return pick_and_deliver(root, prompt, opts)
+  end
+  if saved.pane_id == M.HEADLESS then
+    return background(root, prompt, nil, opts)
+  end
+  local deadline = new_deadline() -- list and prompt together
+  local agents, err = list_agents(deadline)
+  if not agents then -- herdr hiccup: the prompt must not get lost
+    notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
+    return mode == "auto" and background(root, prompt, nil, opts) or false
+  end
+  for _, a in ipairs(agents) do
+    if a.pane_id == saved.pane_id then
+      return deliver(root, prompt, a, opts, deadline) -- the live record: its session may have changed
+    end
+  end
+  if mode == "auto" then
+    notify("the agent you used before is gone; the background agent gets the prompt", vim.log.levels.WARN)
+    return background(root, prompt, nil, opts)
+  end
+  notify("the agent you used before is gone; choose another", vim.log.levels.WARN)
+  return pick_and_deliver(root, prompt, opts, agents) -- already listed: no second list
 end
 
 ---Poke root's agent with `prompt`: the remembered one, else one picked now.
 ---Without herdr, or when the remembered pane is gone, the background agent gets it.
-function M.poke(root, prompt)
-  local mode = config().agent or "auto"
-  if mode == "headless" or (mode == "auto" and not M.available()) then
-    return background(root, prompt)
+---opts: { cwd?, dirs?, env?, on_start?, pick? }, see the README.
+---@return "started"|"queued"|"typed"|"forked"|false
+function M.poke(root, prompt, opts)
+  local ok, res = pcall(poke_unsafe, root, prompt, opts or {})
+  if not ok then
+    notify("poke failed: " .. tostring(res), vim.log.levels.ERROR)
+    return false
   end
-  if not M.available() then
-    return notify("herdr is not running here (config.agent = \"herdr\")", vim.log.levels.ERROR)
-  end
-  local saved = state.get(root).target
-  if type(saved) ~= "table" or not saved.pane_id then
-    return M.pick(root, function(target)
-      if target.pane_id == M.HEADLESS then
-        return background(root, prompt)
-      end
-      list_agents(function(agents, err)
-        for _, a in ipairs(agents or {}) do
-          if a.pane_id == target.pane_id then
-            return deliver(root, prompt, a)
-          end
-        end
-        notify("cannot reach " .. target.title .. (err and (": " .. tostring(err)) or ""), vim.log.levels.ERROR)
-      end)
-    end)
-  end
-  if saved.pane_id == M.HEADLESS then
-    return background(root, prompt)
-  end
-  list_agents(function(agents, err)
-    local ok, perr = pcall(function()
-      if not agents then -- herdr hiccup: the prompt must not get lost
-        notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
-        return mode == "auto" and background(root, prompt) or nil
-      end
-      for _, a in ipairs(agents) do
-        if a.pane_id == saved.pane_id then
-          return deliver(root, prompt, a) -- the live record: its session may have changed
-        end
-      end
-      if mode == "auto" then
-        notify("the agent you used before is gone; the background agent gets the prompt", vim.log.levels.WARN)
-        return background(root, prompt)
-      end
-      notify("the agent you used before is gone; choose another", vim.log.levels.WARN)
-      M.pick(root, function(target)
-        list_agents(function(now)
-          for _, a in ipairs(now or {}) do
-            if a.pane_id == target.pane_id then
-              return deliver(root, prompt, a)
-            end
-          end
-        end)
-      end)
-    end)
-    if not ok then
-      notify("poke failed: " .. tostring(perr), vim.log.levels.ERROR)
-    end
-  end)
+  return res
 end
 
 return M

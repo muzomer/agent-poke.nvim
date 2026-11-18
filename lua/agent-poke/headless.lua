@@ -73,6 +73,9 @@ agents.claude = {
     if c.permission_mode then
       vim.list_extend(args, { "--permission-mode", c.permission_mode })
     end
+    for _, d in ipairs(o.dirs or {}) do
+      vim.list_extend(args, { "--add-dir", d })
+    end
     return args
   end,
   parse = function(ev)
@@ -104,6 +107,9 @@ agents.codex = {
   cmd = "codex",
   args = function(o)
     local args = { o.cmd, "exec", "--json", "--skip-git-repo-check", "--sandbox", o.cfg.permission_mode or "workspace-write" }
+    for _, d in ipairs(o.dirs or {}) do
+      vim.list_extend(args, { "--add-dir", d })
+    end
     if o.resume then
       vim.list_extend(args, { "resume", o.resume })
     end
@@ -178,6 +184,9 @@ agents.gemini = {
     if o.cfg.permission_mode then
       vim.list_extend(args, { "--approval-mode", o.cfg.permission_mode })
     end
+    for _, d in ipairs(o.dirs or {}) do
+      vim.list_extend(args, { "--include-directories", d })
+    end
     return args
   end,
   chat = function(cmd)
@@ -239,6 +248,13 @@ function M.session_id(root)
   return nil
 end
 
+---State of the current (or last) run of root: nil before any run.
+---@return { status: "working"|"done"|"failed", error?: string }?
+function M.status(root)
+  local run = runs[root]
+  return run and { status = run.status, error = run.error } or nil
+end
+
 ---Readable output lines of the current (or last) run of root.
 ---@return string[]
 function M.lines(root)
@@ -292,7 +308,7 @@ function M.args(root, text, opts)
   local args = adapter.args({
     cmd = foreign and adapter.cmd or M.command(),
     prompt = text, cwd = opts.cwd or root, cfg = foreign and {} or cfg(),
-    new_id = opts.new_id, resume = opts.resume, fork = opts.fork,
+    new_id = opts.new_id, resume = opts.resume, fork = opts.fork, dirs = opts.dirs,
   })
   if not foreign then
     vim.list_extend(args, cfg().args or {})
@@ -305,10 +321,11 @@ end
 ---Start a process, calling `on_line` per stdout line and `on_exit` at the end,
 ---both on the main loop. Replaceable in tests.
 ---@return { kill: fun() }
-M.spawn = function(args, cwd, on_line, on_exit)
+M.spawn = function(args, cwd, on_line, on_exit, env)
   local pending = ""
   local h = vim.system(args, {
     cwd = cwd,
+    env = env,
     text = true,
     stdin = "",
     stdout = function(_, data)
@@ -346,7 +363,8 @@ end
 
 local start -- forward: queued pokes start again from the exit handler
 
-start = function(root, text, retried, fork)
+start = function(root, text, retried, fork, o)
+  o = o or {}
   local a = M.adapter(fork and fork.agent) or M.adapter()
   local saved = not fork and M.session_id(root) or nil
   local new_id = not fork and not saved and a.preset_id and uuid() or nil
@@ -428,16 +446,17 @@ start = function(root, text, retried, fork)
           notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
           local q = run.queued
           if q then
-            start(root, q, nil, run.queued_fork)
+            start(root, q, nil, run.queued_fork, run.queued_opts)
           end
           return
         end
-        local again = start(root, text, true)
+        local again = start(root, text, true, nil, vim.tbl_extend("force", o, { on_start = false }))
         if again then
           again.queued = run.queued -- a poke that waited for this run still waits
           again.queued_fork = run.queued_fork
+          again.queued_opts = run.queued_opts
         elseif run.queued then
-          start(root, run.queued, nil, run.queued_fork)
+          start(root, run.queued, nil, run.queued_fork, run.queued_opts)
         end
         return
       end
@@ -446,7 +465,7 @@ start = function(root, text, retried, fork)
     end
     local q = run.queued
     if q then
-      start(root, q, nil, run.queued_fork)
+      start(root, q, nil, run.queued_fork, run.queued_opts)
     end
   end
   local function on_exit(code, stderr, signal)
@@ -458,10 +477,12 @@ start = function(root, text, retried, fork)
       notify(string.format("%s failed: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
     end
   end
+  local run_cwd = fork and fork.cwd or o.cwd or root
   local spawned, handle = pcall(function()
     return M.spawn(M.args(root, text, {
-      resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent, cwd = fork and fork.cwd,
-    }), fork and fork.cwd or root, on_line, on_exit)
+      resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent,
+      cwd = run_cwd, dirs = o.dirs,
+    }), run_cwd, on_line, on_exit, o.env)
   end)
   if not spawned then -- vim.system throws when the command or its directory is missing
     if new_id then
@@ -472,14 +493,22 @@ start = function(root, text, retried, fork)
     return nil
   end
   run.handle = handle
+  if type(o.on_start) == "function" then
+    local cok, cerr = pcall(o.on_start)
+    if not cok then
+      notify("on_start failed: " .. one_line(tostring(cerr), 200), vim.log.levels.ERROR)
+    end
+  end
   return run
 end
 
 ---Send `text` to this root's background agent, starting or resuming it.
 ---@return boolean started false when the poke was queued or could not start
----@param opts? { fork?: { id: string, cwd: string, agent?: string } } run a throwaway fork of that session
+---@return "started"|"queued"|false status
+---@param opts? { fork?: { id: string, cwd: string, agent?: string }, cwd?: string, dirs?: string[], env?: table<string,string>, on_start?: fun() }
 function M.poke(root, text, opts)
-  local fork = opts and opts.fork
+  opts = opts or {}
+  local fork = opts.fork
   local run = runs[root]
   if run and run.status == "working" then
     if run.queued then
@@ -487,10 +516,11 @@ function M.poke(root, text, opts)
     else
       notify("the agent is still working; your prompt runs when it is done")
     end
-    run.queued, run.queued_fork = text, fork
-    return false
+    run.queued, run.queued_fork, run.queued_opts = text, fork, opts
+    return false, "queued"
   end
-  return start(root, text, nil, fork) ~= nil
+  local started = start(root, text, nil, fork, opts) ~= nil
+  return started, started and "started" or false
 end
 
 ---Open root's conversation interactively in a terminal split, with the

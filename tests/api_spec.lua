@@ -273,7 +273,7 @@ describe("agent-poke public API", function()
   end
 
   describe("exports", function()
-    it("are exactly setup, poke, pick, output, chat, stop", function()
+    it("are exactly setup, poke, pick, output, chat, stop, status, lines", function()
       local fns = {}
       for k, v in pairs(require("agent-poke")) do
         if type(v) == "function" then
@@ -281,7 +281,7 @@ describe("agent-poke public API", function()
         end
       end
       table.sort(fns)
-      assert.are.same({ "chat", "output", "pick", "poke", "setup", "stop" }, fns)
+      assert.are.same({ "chat", "lines", "output", "pick", "poke", "setup", "status", "stop" }, fns)
     end)
   end)
 
