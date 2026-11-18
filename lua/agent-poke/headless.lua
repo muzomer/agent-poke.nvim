@@ -248,6 +248,29 @@ function M.session_id(root)
   return nil
 end
 
+---Directory a stored session runs in. A session stores the cwd it was started
+---in; a legacy code-review.nvim one has none: its workdir is the `repo` of
+---<root>/.code-review/session.json when that review is of commits, else root.
+---@return string cwd
+---@return boolean legacy_unknown legacy session whose workdir cannot be known
+function M.session_cwd(root)
+  local s = state.get(root).session
+  if type(s) == "table" and type(s.cwd) == "string" and s.cwd ~= "" then
+    return s.cwd, false
+  end
+  local f = io.open(root .. "/.code-review/session.json", "rb")
+  if not f then
+    return root, true
+  end
+  local text = f:read("a")
+  f:close()
+  local ok, d = pcall(vim.json.decode, text)
+  if ok and type(d) == "table" and d.kind == "commits" and type(d.repo) == "string" and d.repo ~= "" then
+    return d.repo, false
+  end
+  return root, false
+end
+
 ---State of the current (or last) run of root: nil before any run.
 ---@return { status: "working"|"done"|"failed", error?: string }?
 function M.status(root)
@@ -277,8 +300,8 @@ local function push(run, lines)
   end
 end
 
-local function save_session_id(root, id)
-  state.set(root, "session", { id = id, agent = agent_name() })
+local function save_session_id(root, id, cwd)
+  state.set(root, "session", { id = id, agent = agent_name(), cwd = cwd })
 end
 
 local function forget(root)
@@ -368,8 +391,13 @@ start = function(root, text, retried, fork, o)
   local a = M.adapter(fork and fork.agent) or M.adapter()
   local saved = not fork and M.session_id(root) or nil
   local new_id = not fork and not saved and a.preset_id and uuid() or nil
+  local saved_cwd, legacy_unknown
+  if saved then
+    saved_cwd, legacy_unknown = M.session_cwd(root)
+  end
+  local run_cwd = fork and fork.cwd or saved_cwd or o.cwd or root
   if new_id then
-    local ok, err = pcall(save_session_id, root, new_id) -- before the run, so a second poke resumes it
+    local ok, err = pcall(save_session_id, root, new_id, run_cwd) -- before the run, so a second poke resumes it
     if not ok then
       notify(string.format("could not start %s: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
       return nil
@@ -410,7 +438,7 @@ start = function(root, text, retried, fork, o)
       push(run, { "⚠ " .. one_line(r.error, 200) })
     end
     if r.session_id and not fork and not saved and not new_id and r.session_id ~= M.session_id(root) then
-      local sok, serr = pcall(save_session_id, root, r.session_id) -- agents that pick their own id
+      local sok, serr = pcall(save_session_id, root, r.session_id, run_cwd) -- agents that pick their own id
       if not sok then
         notify("could not store the session id: " .. one_line(serr, 200), vim.log.levels.ERROR)
       end
@@ -440,6 +468,12 @@ start = function(root, text, retried, fork, o)
       end
       -- the saved session is gone: start a new one, once (a second loss cannot be fixed by retrying)
       if saved and not retried and a.lost_session and a.lost_session(err) then
+        if legacy_unknown then
+          notify(string.format(
+            "the %s session %s of code-review.nvim was not found (its directory is unknown); starting a new one",
+            a.name, saved
+          ), vim.log.levels.WARN)
+        end
         local fok, ferr = pcall(forget, root)
         if not fok then
           run.status, run.error = "failed", one_line(tostring(ferr), 200)
@@ -477,7 +511,6 @@ start = function(root, text, retried, fork, o)
       notify(string.format("%s failed: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
     end
   end
-  local run_cwd = fork and fork.cwd or o.cwd or root
   local spawned, handle = pcall(function()
     return M.spawn(M.args(root, text, {
       resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent,
@@ -546,13 +579,14 @@ function M.chat(root)
     return notify(M.command() .. " not found; set config.headless.cmd", vim.log.levels.ERROR)
   end
   local cmd = M.adapter().chat(M.command(), id)
+  local cwd = M.session_cwd(root)
   vim.cmd("botright vsplit")
   local win = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(win, buf)
   local job
   local opts = {
-    cwd = root,
+    cwd = cwd,
     on_exit = function()
       if chats[root] == job then
         chats[root] = nil
