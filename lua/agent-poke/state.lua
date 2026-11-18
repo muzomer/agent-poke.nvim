@@ -12,7 +12,21 @@ local function dir()
   return vim.fn.stdpath("state") .. "/agent-poke"
 end
 
+---Trim trailing slashes and resolve symlinks (when the path exists) so equivalent
+---spellings of a root share one state file.
+local function normalize(root)
+  local r = root
+  if #r > 1 then
+    r = r:gsub("/+$", "")
+    if r == "" then
+      r = "/"
+    end
+  end
+  return uv.fs_realpath(r) or r
+end
+
 local function path_for(root)
+  root = normalize(root)
   return dir() .. "/" .. vim.fn.sha256(root) .. ".json"
 end
 
@@ -43,9 +57,16 @@ end
 local function write_atomic(path, data)
   local text = next(data) == nil and "{}" or vim.json.encode(data)
   local tmp = string.format("%s.%d.%d.tmp", path, uv.os_getpid(), uv.hrtime())
-  local f = assert(io.open(tmp, "wb"))
-  f:write(text)
-  f:close()
+  local f, oerr = io.open(tmp, "wb")
+  if not f then
+    error(oerr)
+  end
+  local wok, werr = f:write(text)
+  local cok, cerr = f:close()
+  if not (wok and cok) then
+    os.remove(tmp)
+    error(tostring(werr or cerr))
+  end
   local ok, err = uv.fs_rename(tmp, path)
   if not ok then
     os.remove(tmp)
@@ -55,6 +76,7 @@ end
 
 ---Legacy code-review.nvim session id: <root>/.code-review/headless.json.
 local function legacy_state(root)
+  root = normalize(root)
   local d = decode_object(read_file(root .. "/.code-review/headless.json"))
   if d and type(d.session_id) == "string" and d.session_id ~= "" then
     local agent = type(d.agent) == "string" and d.agent ~= "" and d.agent or "claude"
@@ -64,8 +86,24 @@ local function legacy_state(root)
 end
 
 ---Run fn while holding the root's lock (mkdir is atomic).
+local token_seq = 0
+
+---Remove the lock dir only if it still holds our owner token. The dir is first
+---renamed aside (atomic) so a concurrent new holder's lock is never half-deleted.
+local function release(lock, token)
+  if read_file(lock .. "/owner") ~= token then
+    return
+  end
+  local aside = string.format("%s.rel.%d.%d", lock, uv.os_getpid(), uv.hrtime())
+  if uv.fs_rename(lock, aside) then
+    vim.fn.delete(aside, "rf")
+  end
+end
+
 local function with_lock(path, fn)
   local lock = path .. ".lock"
+  token_seq = token_seq + 1
+  local token = string.format("%d:%d:%d", uv.os_getpid(), uv.hrtime(), token_seq)
   local deadline = uv.hrtime() + LOCK_TIMEOUT_MS * 1e6
   while true do
     local made, merr, ename = uv.fs_mkdir(lock, 448)
@@ -80,8 +118,11 @@ local function with_lock(path, fn)
     end
     local st = uv.fs_stat(lock)
     if st and os.time() - st.mtime.sec > LOCK_STALE_SECS then
-      local removed, rerr, rname = uv.fs_rmdir(lock)
-      if not removed and rname ~= "ENOENT" then
+      local aside = string.format("%s.stale.%d.%d", lock, uv.os_getpid(), uv.hrtime())
+      local removed, rerr, rname = uv.fs_rename(lock, aside)
+      if removed then
+        vim.fn.delete(aside, "rf")
+      elseif rname ~= "ENOENT" then
         error("agent-poke: cannot remove stale state lock " .. lock .. ": " .. tostring(rerr), 0)
       end
     elseif st then
@@ -89,8 +130,19 @@ local function with_lock(path, fn)
     end
     -- lock vanished between mkdir and stat: retry at once (deadline checked above)
   end
+  local ofile = io.open(lock .. "/owner", "wb")
+  local wrote = false
+  if ofile then
+    local wok = ofile:write(token)
+    local cok = ofile:close()
+    wrote = (wok and cok) and true or false
+  end
+  if not wrote then
+    vim.fn.delete(lock, "rf")
+    error("agent-poke: cannot write state lock owner token in " .. lock, 0)
+  end
   local ok, err = pcall(fn)
-  uv.fs_rmdir(lock)
+  release(lock, token)
   if not ok then
     error(err, 0)
   end
