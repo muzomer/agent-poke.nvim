@@ -509,6 +509,12 @@ end
 function M.poke(root, text, opts)
   opts = opts or {}
   local fork = opts.fork
+  if chats[root] then
+    -- the chat has this session open interactively: do not resume it too
+    pcall(vim.fn.setreg, '"', text)
+    notify('a chat has this session open; prompt copied to the " register')
+    return false, false
+  end
   local run = runs[root]
   if run and run.status == "working" then
     if run.queued then
@@ -544,13 +550,16 @@ function M.chat(root)
   local win = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_win_set_buf(win, buf)
+  local job
   local opts = {
     cwd = root,
     on_exit = function()
-      chats[root] = nil
+      if chats[root] == job then
+        chats[root] = nil
+      end
     end,
   }
-  local ok, job
+  local ok
   if vim.fn.has("nvim-0.11") == 1 then
     opts.term = true
     ok, job = pcall(vim.fn.jobstart, cmd, opts)
