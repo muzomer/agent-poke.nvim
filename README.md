@@ -6,7 +6,7 @@ resumable conversation per project root. [herdr](https://herdr.dev) is an
 opt-in target: enable it with `targets = { "herdr" }` to poke an agent running
 in herdr instead.
 
-Requires Neovim 0.10+. No mappings are created. A `VimLeavePre` autocmd (stops background runs on exit) is created on the first background use, or at `setup()` when the herdr target is on.
+Requires Neovim 0.10+ and, for the background agent, the CLI of the agent you choose (`claude`, `codex`, `opencode` or `gemini`) installed and logged in. No mappings are created. A `VimLeavePre` autocmd (stops background runs on exit) is created on the first background use, or at `setup()` when the herdr target is on.
 
 ## Install
 
@@ -62,6 +62,8 @@ require("agent-poke").setup({
 The default. agent-poke works without any multiplexer: with no targets
 enabled, `poke()` runs the prompt in a background agent (`headless.agent`,
 see [Backends](#backends)), one resumable conversation per project root.
+For claude the run is limited to the tools in `allowed_tools` (default `Read`, `Grep`, `Glob`) plus `extra_tools`
+and the per-poke `tools`, so it cannot edit files or run commands you did not allow.
 
 ## Targets
 
@@ -126,7 +128,8 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
 ```
 
 - `poke(root, prompt, opts)`: delivers to the picked herdr pane (only when the herdr target is
-  enabled), else the background agent. A poke while a run is in flight is queued and runs when it finishes.
+  enabled), else the background agent. A poke while a run is in flight is queued and runs when it finishes
+  (a FIFO queue of at most 10 per root; beyond that the oldest is dropped with a notice).
   It returns, synchronously, `"started"` (a background run began), `"queued"`
   (a run is in flight), `"typed"` (typed into the herdr pane), `"forked"` (a
   throwaway fork of the herdr agent's session runs) or `false` (it failed, or a
@@ -140,6 +143,9 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   - `env`: a table merged into the background agent's environment (e.g. `PATH`).
   - `on_start`: `function()` called when a background run starts (later for a queued poke).
   - `pick`: `true` opens the picker even when an agent is remembered.
+
+  When a delivery fails, agent-poke shows one notice and copies the prompt to the `"` register, so nothing you wrote
+  is lost.
 - `progress(id)`: the stage of a poke, `id` being the second value `poke` returns: `"sent"` (delivered to a
   target), `"queued"` (waits for a background run), `"working"`, `"done"` or `"failed"` (plus an error message as
   the second value). `nil` for an unknown id; the last 100 handles are kept. See [Progress](#progress).
@@ -189,7 +195,7 @@ Per-root state (picked target, background session id) is stored as JSON under
 `vim.fn.stdpath("state") .. "/agent-poke/"`, one file per root, written
 atomically under a lock.
 
-Legacy import: if a root has no state yet but a code-review.nvim session file
+Legacy import (for code-review.nvim users): if a root has no state yet but a code-review.nvim session file
 `<root>/.code-review/headless.json` exists, its session id (and agent) is
 imported on first read.
 
