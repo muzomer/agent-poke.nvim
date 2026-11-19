@@ -88,7 +88,8 @@ require("agent-poke").register_target({
   name = "x",                                   -- unique name
   available = function() return true end,       -- optional: is the target usable now?
   list = function(root, ctx) return { { id = "1", title = "my agent" } } end, -- optional: entries to pick from
-  deliver = function(root, entry, prompt, opts, ctx) return "typed" end,    -- required: returns a status, or false, err
+  deliver = function(root, entry, prompt, opts, ctx) return "typed" end,    -- required: returns a status, or false, err; an optional third value is the handle for progress
+  progress = function(handle) return "working" end, -- optional: see Progress
   configure = function(opts) end,               -- optional: built-in targets only, receives its options from setup
 })
 ```
@@ -115,6 +116,8 @@ ap.setup({})                              -- configure; returns the config
 ap.register_target({ name = "x", deliver = function(root, entry, prompt, opts) return "typed" end }) -- add a target
 ap.poke(vim.fn.getcwd(), "run the tests") -- send a prompt
 ap.pick(vim.fn.getcwd(), function() end)  -- choose the agent (herdr panes only when the herdr target is enabled, or the background agent); callback is optional
+local _, id = ap.poke(vim.fn.getcwd(), "run the tests") -- the second value names the poke
+ap.progress(id)                           -- "sent"|"queued"|"working"|"done"|"failed", err?
 ap.status(vim.fn.getcwd())                -- state of the background run: nil, or { status = "working"|"done"|"failed"|"stopped", error? }
 ap.lines(vim.fn.getcwd())                 -- readable output lines of the current/last background run
 ap.output(vim.fn.getcwd())                -- toggle a window following the current/last background run
@@ -137,6 +140,9 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   - `env`: a table merged into the background agent's environment (e.g. `PATH`).
   - `on_start`: `function()` called when a background run starts (later for a queued poke).
   - `pick`: `true` opens the picker even when an agent is remembered.
+- `progress(id)`: the stage of a poke, `id` being the second value `poke` returns: `"sent"` (delivered to a
+  target), `"queued"` (waits for a background run), `"working"`, `"done"` or `"failed"` (plus an error message as
+  the second value). `nil` for an unknown id; the last 100 handles are kept. See [Progress](#progress).
 - `status(root)`: `nil` before any background run, else (after `stop()`, `"stopped"` and `lines()` ends with `(stopped)`) `{ status = "working" | "done" | "failed" | "stopped", error? }`.
 - `lines(root)`: the readable output lines of the current/last background run.
 - `pick(root, on_pick)`: lets you choose between the agents running in herdr (when the herdr
@@ -147,6 +153,34 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   session (poke first) and no run in flight.
 - `stop(root)`: stops the run; notifies when there is none.
 - `config`: the current configuration table.
+
+## Progress
+
+Every poke gets an id (the second return value of `poke`). `progress(id)` returns its stage:
+
+| stage       | meaning |
+|-------------|---------|
+| `"sent"`    | delivered to a target; stays so unless the target reports more |
+| `"queued"`  | waits for the running background run |
+| `"working"` | a background run is in progress |
+| `"done"`    | finished |
+| `"failed"`  | failed, dropped from the queue or stopped; `progress` also returns the error |
+
+Background runs report every stage. A target may report the stage of a delivered prompt through an optional
+`progress(handle)` returning a stage (and an error for `"failed"`); `handle` is the third value its `deliver`
+returned (else the poke id). It is called only when `progress(id)` is, never in the background, and a throwing
+or `nil` result leaves the stage as it was. A herdr fork follows its background run; a prompt typed into a pane
+stays `"sent"`.
+
+Each stage change fires a `User` autocmd, `AgentPokeProgress`, with `data = { id, root, stage, target }`
+(`target` is `"background"` for the background agent):
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = "AgentPokeProgress",
+  callback = function(ev) print(ev.data.id, ev.data.stage) end,
+})
+```
 
 ## State
 

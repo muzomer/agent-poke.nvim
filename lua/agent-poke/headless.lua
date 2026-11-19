@@ -5,6 +5,7 @@
 ---their sessions by directory). A poke while a run is in flight is queued
 ---(one slot: the latest wins) and runs when the run ends.
 local state = require("agent-poke.state")
+local progress = require("agent-poke.progress")
 
 local uv = vim.uv or vim.loop
 
@@ -403,13 +404,13 @@ local start -- forward: queued pokes start again from the exit handler
 local function start_next(root, queue)
   while #queue > 0 do
     local q = table.remove(queue, 1)
-    if start(root, q.text, nil, q.fork, q.opts, queue) then
+    if start(root, q.text, nil, q.fork, q.opts, queue, q.id) then
       return
     end
   end
 end
 
-start = function(root, text, retried, fork, o, queue)
+local function start_unsafe(root, text, retried, fork, o, queue, id)
   o = o or {}
   local a = M.adapter(fork and fork.agent) or M.adapter()
   local saved = not fork and M.session_id(root) or nil
@@ -423,11 +424,13 @@ start = function(root, text, retried, fork, o, queue)
     local ok, err = pcall(save_session_id, root, new_id, run_cwd) -- before the run, so a second poke resumes it
     if not ok then
       notify(string.format("could not start %s: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
+      progress.set(id, "failed", one_line(tostring(err), 200))
       return nil
     end
   end
-  local run = { status = "working", text = text, fork = fork, lines = {}, queue = queue or {} }
+  local run = { id = id, status = "working", text = text, fork = fork, lines = {}, queue = queue or {} }
   runs[root] = run
+  progress.set(id, "working")
   push(run, { string.format("● %s · %s", a.name, one_line(text, 80)) })
   local partial -- text streamed in pieces (delta events), shown as it grows
   local function on_line(line)
@@ -484,6 +487,7 @@ start = function(root, text, retried, fork, o, queue)
     end
     if code == 0 and not (r and r.error) then
       run.status = "done"
+      progress.set(id, "done")
     else
       local err = vim.trim((r and r.error) or stderr or "")
       if err == "" then
@@ -500,17 +504,19 @@ start = function(root, text, retried, fork, o, queue)
         local fok, ferr = pcall(forget, root)
         if not fok then
           run.status, run.error = "failed", one_line(tostring(ferr), 200)
+          progress.set(id, "failed", run.error)
           notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
           start_next(root, run.queue)
           return
         end
         -- pokes that waited for this run still wait, on the new one
-        if not start(root, text, true, nil, vim.tbl_extend("force", o, { on_start = false }), run.queue) then
+        if not start(root, text, true, nil, vim.tbl_extend("force", o, { on_start = false }), run.queue, id) then
           start_next(root, run.queue)
         end
         return
       end
       run.status, run.error = "failed", one_line(err, 200)
+      progress.set(id, "failed", run.error)
       notify(string.format("%s failed: %s", a.name, run.error), vim.log.levels.ERROR)
     end
     start_next(root, run.queue)
@@ -520,6 +526,7 @@ start = function(root, text, retried, fork, o, queue)
     if not ok then
       if runs[root] == run and run.status == "working" then
         run.status, run.error = "failed", one_line(tostring(err), 200)
+        progress.set(id, "failed", run.error)
       end
       notify(string.format("%s failed: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
     end
@@ -535,6 +542,7 @@ start = function(root, text, retried, fork, o, queue)
       pcall(forget, root) -- that session was never created
     end
     run.status, run.error = "failed", one_line(tostring(handle), 200)
+    progress.set(id, "failed", run.error)
     notify(string.format("could not start %s: %s", a.name, run.error), vim.log.levels.ERROR)
     return nil
   end
@@ -548,9 +556,26 @@ start = function(root, text, retried, fork, o, queue)
   return run
 end
 
+---start_unsafe that never throws: a failure ends the handle 'failed' (and the run, if it was set).
+start = function(root, text, retried, fork, o, queue, id)
+  local ok, res = pcall(start_unsafe, root, text, retried, fork, o, queue, id)
+  if ok then
+    return res
+  end
+  local msg = one_line(tostring(res), 200)
+  local run = runs[root]
+  if run and run.id == id and run.status == "working" and not run.handle then
+    run.status, run.error = "failed", msg
+  end
+  progress.set(id, "failed", msg)
+  notify("could not start the agent: " .. msg, vim.log.levels.ERROR)
+  return nil
+end
+
 ---Send `text` to this root's background agent, starting or resuming it.
 ---@return boolean started false when the poke was queued or could not start
 ---@return "started"|"queued"|false status
+---@return string id handle of this poke (see agent-poke.progress)
 ---@param opts? { fork?: { id: string, cwd: string, agent?: string }, cwd?: string,  tools?: string[], dirs?: string[], env?: table<string,string>, on_start?: fun() }
 function M.poke(root, text, opts)
   opts = opts or {}
@@ -559,21 +584,24 @@ function M.poke(root, text, opts)
     -- the chat has this session open interactively: do not resume it too
     pcall(vim.fn.setreg, '"', text)
     notify('a chat has this session open; prompt copied to the " register')
-    return false, false
+    return false, false, progress.new(root, "background", "failed", "a chat has this session open", true)
   end
   local run = runs[root]
   if run and run.status == "working" then
     if #run.queue >= MAX_QUEUED then
-      table.remove(run.queue, 1)
+      local dropped = table.remove(run.queue, 1)
+      progress.set(dropped.id, "failed", "dropped: too many prompts waiting")
       notify(string.format("%d prompts are already waiting; dropped the oldest", MAX_QUEUED))
     elseif #run.queue == 0 then
       notify("the agent is still working; your prompt runs when it is done")
     end
-    run.queue[#run.queue + 1] = { text = text, fork = fork, opts = opts }
-    return false, "queued"
+    local id = progress.new(root, "background", "queued", nil, true)
+    run.queue[#run.queue + 1] = { text = text, fork = fork, opts = opts, id = id }
+    return false, "queued", id
   end
-  local started = start(root, text, nil, fork, opts) ~= nil
-  return started, started and "started" or false
+  local id = progress.new(root, "background", "working", nil, true)
+  local started = start(root, text, nil, fork, opts, nil, id) ~= nil
+  return started, started and "started" or false, id
 end
 
 ---Open root's conversation interactively in a terminal split, with the
@@ -633,6 +661,10 @@ function M.stop(root)
     local lines = vim.list_slice(run.lines, 1, #run.lines)
     lines[#lines + 1] = "(stopped)"
     runs[root] = { lines = lines, status = "stopped", queue = {} }
+    progress.set(run.id, "failed", "stopped")
+    for _, q in ipairs(run.queue) do
+      progress.set(q.id, "failed", "cancelled: the run was stopped")
+    end
     if run.handle then
       run.handle.kill()
     end

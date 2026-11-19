@@ -206,7 +206,7 @@ local function capture(fn)
   if not res[1] then
     error(res[2], 0)
   end
-  return msgs, res[2], res[3]
+  return msgs, res[2], res[3], res[4]
 end
 
 ---Report a failed delivery once, on one line, and keep the prompt in the " register.
@@ -221,6 +221,7 @@ local function fail(what, prompt, reason)
 end
 
 ---@return "started"|"queued"|"forked"|false
+---@return string? run_id progress handle of the background run
 local function background(root, prompt, fork, opts, what, sent)
   what = what or "the background agent"
   if not headless.available() and not fork then
@@ -228,7 +229,7 @@ local function background(root, prompt, fork, opts, what, sent)
   end
   local o = vim.tbl_extend("force", {}, opts or {})
   o.fork = fork
-  local msgs, _, status = capture(function()
+  local msgs, _, status, run_id = capture(function()
     return headless.poke(root, sent or prompt, o)
   end)
   if not status then
@@ -249,9 +250,9 @@ local function background(root, prompt, fork, opts, what, sent)
     vim.notify(m.msg, m.level)
   end
   if fork and status == "started" then
-    return "forked"
+    return "forked", run_id
   end
-  return status
+  return status, run_id
 end
 
 ---Deliver `prompt` to a live herdr agent: a throwaway fork of its session when
@@ -311,13 +312,24 @@ function M.list(_, ctx)
 end
 
 ---Deliver `prompt` to a listed entry. A failure is reported here, once.
----@return "typed"|"forked"|"queued"|false
+---A fork runs in the background: its third value is a handle that progress() follows.
+---@return "typed"|"forked"|"queued"|false status
+---@return nil err
+---@return { run_id: string }? handle
 function M.deliver(root, entry, prompt, opts, ctx)
-  local ok, res = pcall(deliver, root, prompt, entry, opts or {}, ctx and (ctx.deadline or new_deadline()) or new_deadline())
+  local ok, res, run_id = pcall(deliver, root, prompt, entry, opts or {}, ctx and (ctx.deadline or new_deadline()) or new_deadline())
   if not ok then
     return fail(entry.title or "the agent", prompt, res)
   end
-  return res
+  return res, nil, run_id and { run_id = run_id } or nil
+end
+
+---Progress of a delivered prompt: a fork follows its background run; a typed
+---prompt has no status to report (nil: core shows "sent"). Makes no herdr call.
+function M.progress(handle)
+  if type(handle) == "table" and handle.run_id then
+    return require("agent-poke.progress").stage(handle.run_id)
+  end
 end
 
 return M

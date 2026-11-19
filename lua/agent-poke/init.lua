@@ -1,10 +1,13 @@
 local M = {}
 
 local defaults = require("agent-poke.defaults")
+local progress = require("agent-poke.progress")
 
 M.config = defaults()
 
 local KNOWN_AGENTS = { claude = true, codex = true, opencode = true, gemini = true }
+
+local VALID_STAGES = { sent = true, queued = true, working = true, done = true, failed = true }
 
 local BACKGROUND = "background" -- name of the background agent in a stored target
 
@@ -135,21 +138,31 @@ local function is_available(t)
 end
 
 local function background(root, prompt, opts)
-  local _, status = require("agent-poke.headless").poke(root, prompt, opts)
-  return status or false
+  local _, status, id = require("agent-poke.headless").poke(root, prompt, opts)
+  return status or false, id
 end
 
 ---Deliver through a target entry; a throwing target must not escape.
+---@return any status
+---@return string id handle of this delivery
 local function deliver(t, root, entry, prompt, opts, ctx)
-  local ok, status, err = pcall(t.deliver, root, entry, prompt, opts, ctx or {})
+  local ok, status, err, th = pcall(t.deliver, root, entry, prompt, opts, ctx or {})
   if not ok then
     notify("poke failed: " .. tostring(status), vim.log.levels.ERROR)
-    return false
+    return false, progress.new(root, t.name, "failed", tostring(status))
   end
-  if not status and err then
-    notify("poke failed: " .. tostring(err), vim.log.levels.ERROR)
+  if not status then
+    if err then
+      notify("poke failed: " .. tostring(err), vim.log.levels.ERROR)
+    end
+    return status, progress.new(root, t.name, "failed", err and tostring(err) or "the delivery failed")
   end
-  return status
+  local id = progress.new(root, t.name, "sent")
+  local h = progress.get(id)
+  if h then
+    h.th = th ~= nil and th or id -- what the target's progress(handle) gets
+  end
+  return status, id
 end
 
 local function entries_of(t, root, ctx)
@@ -245,7 +258,8 @@ end
 
 ---Poke root's agent with `prompt`: the remembered target entry, else the background agent.
 ---opts: { cwd?, dirs?, env?, on_start?, pick? }.
----@return "started"|"queued"|"typed"|"forked"|false
+---@return "started"|"queued"|"typed"|"forked"|false status
+---@return string? id handle of this poke, for progress(id)
 function M.poke(root, prompt, opts)
   opts = opts or {}
   if #M.targets == 0 then
@@ -253,16 +267,16 @@ function M.poke(root, prompt, opts)
   end
   local saved = require("agent-poke.state").get(root).target
   if opts.pick or type(saved) ~= "table" then -- no stored choice: ask
-    local result = false
+    local result, rid = false, nil
     pick_generic(root, function(item)
       if item.target then
-        result = deliver(item.target, root, item.entry, prompt, opts)
+        result, rid = deliver(item.target, root, item.entry, prompt, opts)
       else
-        result = background(root, prompt, opts)
+        result, rid = background(root, prompt, opts)
       end
       return result
     end)
-    return result
+    return result, rid
   end
   local target = saved.target and find_target(saved.target)
   if target and not is_available(target) then
@@ -281,6 +295,27 @@ function M.poke(root, prompt, opts)
     end
   end
   return background(root, prompt, opts)
+end
+
+---Where the poke `id` (the second value of poke) is: "sent"|"queued"|"working"|"done"|"failed".
+---A target's delivery is as the target's progress(handle) says, else "sent".
+---@return string? stage nil for an unknown id
+---@return string? err
+function M.progress(id)
+  local h = progress.get(id)
+  if not h then
+    return nil
+  end
+  if not h.background and h.stage ~= "done" and h.stage ~= "failed" then
+    local t = find_target(h.target)
+    if t and type(t.progress) == "function" then
+      local ok, stage, err = pcall(t.progress, h.th ~= nil and h.th or h.id)
+      if ok and VALID_STAGES[stage] then
+        progress.set(h.id, stage, stage == "failed" and err and tostring(err) or nil)
+      end
+    end
+  end
+  return progress.stage(id)
 end
 
 ---State of root's background run: nil before any, else { status = "working"|"done"|"failed"|"stopped", error? }.
