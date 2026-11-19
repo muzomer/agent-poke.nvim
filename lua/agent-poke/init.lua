@@ -29,7 +29,7 @@ function M.poke(root, prompt, opts)
   return require("agent-poke.herdr").poke(root, prompt, opts)
 end
 
----State of root's background run: nil before any, else { status = "working"|"done"|"failed", error? }.
+---State of root's background run: nil before any, else { status = "working"|"done"|"failed"|"stopped", error? }.
 function M.status(root)
   return require("agent-poke.headless").status(root)
 end

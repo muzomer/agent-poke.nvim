@@ -69,7 +69,7 @@ local ap = require("agent-poke")
 ap.setup({ agent = "headless" })          -- configure; returns the config
 ap.poke(vim.fn.getcwd(), "run the tests") -- send a prompt
 ap.pick(vim.fn.getcwd(), function() end)  -- choose the agent (herdr panes or the background agent); callback is optional
-ap.status(vim.fn.getcwd())                -- state of the background run: nil, or { status = "working"|"done"|"failed", error? }
+ap.status(vim.fn.getcwd())                -- state of the background run: nil, or { status = "working"|"done"|"failed"|"stopped", error? }
 ap.lines(vim.fn.getcwd())                 -- readable output lines of the current/last background run
 ap.output(vim.fn.getcwd())                -- toggle a window following the current/last background run
 ap.chat(vim.fn.getcwd())                  -- open the background session interactively in a terminal
@@ -88,7 +88,7 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   - `env`: a table merged into the background agent's environment (e.g. `PATH`).
   - `on_start`: `function()` called when a background run starts (later for a queued poke).
   - `pick`: `true` opens the picker even when an agent is remembered.
-- `status(root)`: `nil` before any background run, else `{ status = "working" | "done" | "failed", error? }`.
+- `status(root)`: `nil` before any background run, else (after `stop()`, `"stopped"` and `lines()` ends with `(stopped)`) `{ status = "working" | "done" | "failed" | "stopped", error? }`.
 - `lines(root)`: the readable output lines of the current/last background run.
 - `pick(root, on_pick)`: lets you choose between the agents running in herdr
   and the background agent; the choice is remembered for the root.

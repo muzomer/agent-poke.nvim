@@ -1,5 +1,5 @@
 ---A window following the output of root's current (or last) background run,
----stream-json rendered as text. Refreshed while the run is in flight; a second
+---stream-json rendered as text. Refreshed while it is open, so later runs show too; a second
 ---toggle closes it.
 local headless = require("agent-poke.headless")
 
@@ -10,7 +10,7 @@ local M = {}
 
 M.interval = 200 -- ms between refreshes while the run is in flight
 
-local win, buf, timer
+local win, buf, timer, last -- last: lines last rendered
 
 local function stop_handle(t)
   if t and not t:is_closing() then
@@ -29,7 +29,7 @@ local function close()
   if win and api.nvim_win_is_valid(win) then
     pcall(api.nvim_win_close, win, true)
   end
-  win, buf = nil, nil
+  win, buf, last = nil, nil, nil
 end
 
 local function render(root, buf, win)
@@ -40,6 +40,11 @@ local function render(root, buf, win)
   if #lines == 0 then
     lines = { "(no output yet)" }
   end
+  -- only touch the buffer/cursor when the content changed, so the user can scroll or yank
+  if last and vim.deep_equal(last, lines) then
+    return
+  end
+  last = vim.deepcopy(lines)
   vim.bo[buf].modifiable = true
   api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -66,31 +71,23 @@ function M.toggle(root)
   if api.nvim_win_is_valid(prev) then
     api.nvim_set_current_win(prev)
   end
-  if headless.running(root) then
-    local mine, mybuf = win, buf
-    local t = uv.new_timer()
-    timer = t
-    t:start(M.interval, M.interval, vim.schedule_wrap(function()
-      -- only ever stop the timer this callback was created for
-      if t:is_closing() then
-        return
+  -- always follow: a run started later shows without reopening the window
+  local mine, mybuf = win, buf
+  local t = uv.new_timer()
+  timer = t
+  t:start(M.interval, M.interval, vim.schedule_wrap(function()
+    -- only ever stop the timer this callback was created for
+    if t:is_closing() then
+      return
+    end
+    local ok = api.nvim_win_is_valid(mine) and api.nvim_buf_is_valid(mybuf) and pcall(render, root, mybuf, mine)
+    if not ok then
+      stop_handle(t)
+      if timer == t then
+        timer = nil
       end
-      if not api.nvim_win_is_valid(mine) or not api.nvim_buf_is_valid(mybuf) then
-        stop_handle(t)
-        if timer == t then
-          timer = nil
-        end
-        return
-      end
-      local ok = pcall(render, root, mybuf, mine)
-      if not ok or not headless.running(root) then
-        stop_handle(t)
-        if timer == t then
-          timer = nil
-        end
-      end
-    end))
-  end
+    end
+  end))
 end
 
 return M

@@ -12,7 +12,7 @@ local M = {}
 
 M.MAX_LINES = 500 -- output lines kept per run
 
-local runs = {} -- root -> { handle, lines, status = "working"|"done"|"failed", queued?, text }
+local runs = {} -- root -> { handle, lines, status = "working"|"done"|"failed"|"stopped", queued?, text }
 local chats = {} -- root -> terminal job id of an open chat
 
 local function cfg()
@@ -272,7 +272,7 @@ function M.session_cwd(root)
 end
 
 ---State of the current (or last) run of root: nil before any run.
----@return { status: "working"|"done"|"failed", error?: string }?
+---@return { status: "working"|"done"|"failed"|"stopped", error?: string }?
 function M.status(root)
   local run = runs[root]
   return run and { status = run.status, error = run.error } or nil
@@ -618,7 +618,11 @@ end
 function M.stop(root)
   local run = runs[root]
   if run and run.status == "working" then
-    runs[root] = nil
+    -- keep the stopped run's text for the output window; the stub also makes
+    -- the old run's callbacks see runs[root] ~= run
+    local lines = vim.list_slice(run.lines, 1, #run.lines)
+    lines[#lines + 1] = "(stopped)"
+    runs[root] = { lines = lines, status = "stopped", queue = {} }
     if run.handle then
       run.handle.kill()
     end
