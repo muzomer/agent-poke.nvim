@@ -131,6 +131,9 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   - `cwd`: the background agent runs, and later resumes, there instead of in `root`.
   - `dirs`: extra directories, each passed as the agent's add-dir flag
     (`--add-dir` for claude and codex, `--include-directories` for gemini).
+  - `tools`: extra tool rules (e.g. `{ "Bash(beads-ask:*)" }`) added to claude's `--allowedTools` for this poke only,
+    and for its run from the queue. Backends without per-tool allow lists (gemini, codex, opencode)
+    ignore it, as does a poke through a herdr target.
   - `env`: a table merged into the background agent's environment (e.g. `PATH`).
   - `on_start`: `function()` called when a background run starts (later for a queued poke).
   - `pick`: `true` opens the picker even when an agent is remembered.

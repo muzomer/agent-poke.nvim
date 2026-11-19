@@ -66,6 +66,15 @@ agents.claude = {
     end
     local tools = vim.deepcopy(c.allowed_tools or agents.claude.DEFAULT_TOOLS)
     vim.list_extend(tools, c.extra_tools or {})
+    vim.list_extend(tools, o.tools or {})
+    local seen, uniq = {}, {}
+    for _, t in ipairs(tools) do
+      if not seen[t] then
+        seen[t] = true
+        uniq[#uniq + 1] = t
+      end
+    end
+    tools = uniq
     if #tools > 0 then
       args[#args + 1] = "--allowedTools"
       vim.list_extend(args, tools)
@@ -332,6 +341,7 @@ function M.args(root, text, opts)
     cmd = foreign and adapter.cmd or M.command(),
     prompt = text, cwd = opts.cwd or root, cfg = foreign and {} or cfg(),
     new_id = opts.new_id, resume = opts.resume, fork = opts.fork, dirs = opts.dirs,
+    tools = opts.tools,
   })
   if not foreign then
     vim.list_extend(args, cfg().args or {})
@@ -517,7 +527,7 @@ start = function(root, text, retried, fork, o, queue)
   local spawned, handle = pcall(function()
     return M.spawn(M.args(root, text, {
       resume = saved, new_id = new_id, fork = fork and fork.id, agent = fork and fork.agent,
-      cwd = run_cwd, dirs = o.dirs,
+      cwd = run_cwd, dirs = o.dirs, tools = not fork and o.tools or nil,
     }), run_cwd, on_line, on_exit, o.env)
   end)
   if not spawned then -- vim.system throws when the command or its directory is missing
@@ -541,7 +551,7 @@ end
 ---Send `text` to this root's background agent, starting or resuming it.
 ---@return boolean started false when the poke was queued or could not start
 ---@return "started"|"queued"|false status
----@param opts? { fork?: { id: string, cwd: string, agent?: string }, cwd?: string, dirs?: string[], env?: table<string,string>, on_start?: fun() }
+---@param opts? { fork?: { id: string, cwd: string, agent?: string }, cwd?: string,  tools?: string[], dirs?: string[], env?: table<string,string>, on_start?: fun() }
 function M.poke(root, text, opts)
   opts = opts or {}
   local fork = opts.fork
