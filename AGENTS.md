@@ -125,3 +125,17 @@ bd prime                # Refresh Beads context
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 <!-- END BEADS CODEX SETUP -->
+
+## Review checklist
+
+Implementers follow these and reviewers check them.
+
+- Every wait or retry loop gives up with an error once its timeout passes, and fails fast on errors that retrying cannot fix.
+- In async callbacks, guard every call that can throw so run state always leaves 'working' on every exit path.
+- Build, run and parse a process with the same adapter; never mix the configured one with a per-call one.
+- A deferred callback only stops or cleans up the handle it was created for, never whatever a shared module variable holds now.
+- Bound the total time a synchronous call blocks the editor across all its sub-calls, not each sub-call separately.
+- If acquiring a resource takes several steps, undo the earlier steps when a later one fails, so it is released on every exit path.
+- A periodic refresh only rewrites the buffer or moves the cursor when the content changed, so it never overrides what the user does in between.
+- Take repository URLs and account names from the owner or the git remote; never guess them.
+- When a new path replaces an old one, delete the old code and move its tests to the new path; never leave both.
