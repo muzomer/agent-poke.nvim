@@ -198,7 +198,7 @@ end
 
 local function offer(root, agents, on_pick, list_err)
   local items = vim.list_extend({}, agents)
-  if config().agent ~= "herdr" then
+  if config().agent ~= "herdr" and headless.available() then
     local h = background_target()
     h.status = headless.session_id(root) and "resume" or "new"
     h.cwd = "runs without a terminal"
@@ -211,15 +211,17 @@ local function offer(root, agents, on_pick, list_err)
     if not choice then
       return
     end
-    remember(root, choice)
-    if on_pick then
-      local ok, err = pcall(on_pick, choice)
-      if not ok then
-        notify("poke failed: " .. tostring(err), vim.log.levels.ERROR)
-      end
+    if not on_pick then
+      return remember(root, choice)
+    end
+    local ok, res = pcall(on_pick, choice)
+    if not ok then
+      notify("poke failed: " .. tostring(res), vim.log.levels.ERROR)
+    elseif res then -- stored only once the prompt was delivered
+      remember(root, choice)
     end
   end
-  if #agents == 0 and not list_err and config().agent ~= "herdr" then -- nothing to choose from
+  if #items == 1 and #agents == 0 and not list_err and config().agent ~= "herdr" then -- nothing to choose from
     return choose(items[1])
   end
   local function open()
@@ -242,7 +244,8 @@ end
 
 ---Let the user choose the agent to poke for `root`: the agents running in herdr
 ---(this pane left out) plus the background agent. The choice is remembered per root.
----@param on_pick? fun(target: table) called with the choice
+---@param on_pick? fun(target: table): any called with the choice; the choice is
+---remembered when it returns a truthy value (without on_pick: at once)
 ---@param listed? table[] agents the caller has just listed: not listed again
 function M.pick(root, on_pick, listed)
   if not M.available() then
@@ -261,19 +264,63 @@ end
 
 -- Sending ------------------------------------------------------------------------------
 
+---Run fn with vim.notify captured; returns the messages and fn's results.
+local function capture(fn)
+  local orig, msgs = vim.notify, {}
+  vim.notify = function(msg, level)
+    msgs[#msgs + 1] = { msg = msg, level = level }
+  end
+  local res = vim.F.pack_len(pcall(fn))
+  vim.notify = orig
+  if not res[1] then
+    error(res[2], 0)
+  end
+  return msgs, res[2], res[3]
+end
+
+---Report a failed delivery once, on one line, and keep the prompt in the " register.
+local function fail(what, prompt, reason)
+  reason = vim.trim(tostring(reason or "")):gsub("^agent%-poke: ", ""):gsub("%s*\n%s*", " ")
+  local kept = pcall(vim.fn.setreg, '"', prompt)
+  notify(
+    string.format("could not poke %s%s%s", what, reason ~= "" and (": " .. reason) or "", kept and " (prompt copied to the \" register)" or ""),
+    vim.log.levels.ERROR
+  )
+  return false
+end
+
 ---@return "started"|"queued"|"forked"|false
-local function background(root, prompt, fork, opts)
+local function background(root, prompt, fork, opts, what, sent)
+  what = what or "the background agent"
   if not headless.available() and not fork then
-    notify(headless.command() .. " not found; set config.headless.cmd", vim.log.levels.ERROR)
-    return false
+    return fail(what, prompt, headless.command() .. " not found; set config.headless.cmd")
   end
   local o = vim.tbl_extend("force", {}, opts or {})
   o.fork = fork
-  local _, status = headless.poke(root, prompt, o)
+  local msgs, _, status = capture(function()
+    return headless.poke(root, sent or prompt, o)
+  end)
+  if not status then
+    local last = msgs[#msgs]
+    local reason = last and last.msg or "it did not start"
+    if reason:find('prompt copied to the " register', 1, true) then -- already kept by headless
+      for _, m in ipairs(msgs) do
+        vim.notify(m.msg, m.level)
+      end
+      return false
+    end
+    return fail(what, prompt, reason)
+  end
+  if fork and status == "started" then
+    notify("poked " .. what .. " (fork)")
+  end
+  for _, m in ipairs(msgs) do
+    vim.notify(m.msg, m.level)
+  end
   if fork and status == "started" then
     return "forked"
   end
-  return status or false
+  return status
 end
 
 ---Deliver `prompt` to a live herdr agent: a throwaway fork of its session when
@@ -286,14 +333,13 @@ local function deliver(root, prompt, target, opts, deadline)
   end
   local name = target.agent or "claude"
   local adapter = headless.adapter(name)
+  local no_session = false
   if isolate == "fork" and adapter and adapter.fork and headless.available(name) then
     local fork = M.session_of(target)
     if fork then
-      notify("poked " .. target.title .. " (fork)")
-      return background(root, M.STYLE.fork .. "\n\n" .. prompt, fork, opts)
+      return background(root, prompt, fork, opts, target.title, M.STYLE.fork .. "\n\n" .. prompt)
     end
-    notify(string.format("could not find the session of %s to fork; typing the prompt into its pane instead", target.title),
-      vim.log.levels.WARN)
+    no_session = true
   end
   local text = prompt
   if isolate and adapter and adapter.subagents then
@@ -301,11 +347,10 @@ local function deliver(root, prompt, target, opts, deadline)
   end
   local result, err = decode(run_sync({ "herdr", "agent", "prompt", target.pane_id, text }, deadline))
   if result then
-    notify("poked " .. target.title)
+    notify("poked " .. target.title .. (no_session and " (typed: its session was not found to fork)" or ""))
     return "typed"
   end
-  notify(string.format("could not poke %s: %s", target.title, tostring(err)), vim.log.levels.ERROR)
-  return false
+  return fail(target.title, prompt, err)
 end
 
 ---Choose an agent now and deliver to it. Returns the status when the choice is
@@ -315,10 +360,12 @@ local function pick_and_deliver(root, prompt, opts, listed)
   M.pick(root, function(target)
     if target.pane_id == M.HEADLESS then
       result = background(root, prompt, nil, opts)
+      return result
     else
       -- the picker listed the agents just now: no second list; the time
       -- from the choice on has a deadline of its own
       result = deliver(root, prompt, target, opts, new_deadline())
+      return result
     end
   end, listed)
   return result
