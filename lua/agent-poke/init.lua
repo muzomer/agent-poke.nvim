@@ -17,15 +17,15 @@ M.targets = {}
 
 ---Register a target: { name, deliver(root, entry, prompt, opts) -> status, err,
 ---available?() -> boolean, list?(root) -> { {id, title, ...} } }.
----A built-in adapter module may also provide poke(root, prompt, opts) and
----pick(root, on_pick), taking over those steps.
+---list and deliver get a `ctx` table shared by the calls of one poke step.
+---A target may have configure(opts) (its options from setup).
 ---@return boolean registered
 function M.register_target(spec)
   if type(spec) ~= "table" or type(spec.name) ~= "string" or spec.name == "" then
     notify("a target needs a name", vim.log.levels.ERROR)
     return false
   end
-  if type(spec.deliver) ~= "function" and type(spec.poke) ~= "function" then
+  if type(spec.deliver) ~= "function" then
     notify('target "' .. spec.name .. '" needs a deliver function', vim.log.levels.ERROR)
     return false
   end
@@ -47,7 +47,7 @@ local function find_target(name)
   end
 end
 
-local function add_target(t)
+local function add_target(t, topts)
   if type(t) == "string" then
     if find_target(t) then
       return -- a built-in asked for twice
@@ -56,7 +56,9 @@ local function add_target(t)
     if not ok then
       return notify('unknown target "' .. t .. '"', vim.log.levels.ERROR)
     end
-    M.register_target(mod)
+    if M.register_target(mod) and type(mod.configure) == "function" then
+      mod.configure(type(topts) == "table" and topts or {})
+    end
   else
     M.register_target(t)
   end
@@ -100,18 +102,22 @@ function M.setup(opts)
     targets = legacy_targets(opts.agent)
   end
   M.config = vim.tbl_deep_extend("force", M.config, opts)
+  M.targets = {} -- a later setup() replaces the target list
   for _, t in ipairs(targets or {}) do
-    add_target(t)
+    local topts = type(t) == "string" and targets[t] or nil -- { "name", name = { ... } }
+    add_target(t, topts)
   end
-  return M.config
-end
-
-local function takeover(name)
-  for _, t in ipairs(M.targets) do
-    if type(t[name]) == "function" then
-      return t
+  local named = {} -- { name = { ...options } }
+  for k, v in pairs(targets or {}) do
+    if type(k) == "string" and v then
+      named[#named + 1] = k
     end
   end
+  table.sort(named)
+  for _, k in ipairs(named) do
+    add_target(k, targets[k])
+  end
+  return M.config
 end
 
 local function is_available(t)
@@ -128,8 +134,8 @@ local function background(root, prompt, opts)
 end
 
 ---Deliver through a target entry; a throwing target must not escape.
-local function deliver(t, root, entry, prompt, opts)
-  local ok, status, err = pcall(t.deliver, root, entry, prompt, opts)
+local function deliver(t, root, entry, prompt, opts, ctx)
+  local ok, status, err = pcall(t.deliver, root, entry, prompt, opts, ctx or {})
   if not ok then
     notify("poke failed: " .. tostring(status), vim.log.levels.ERROR)
     return false
@@ -140,14 +146,14 @@ local function deliver(t, root, entry, prompt, opts)
   return status
 end
 
-local function entries_of(t, root)
+local function entries_of(t, root, ctx)
   if type(t.list) ~= "function" or not is_available(t) then
     return {}
   end
-  local ok, list = pcall(t.list, root)
+  local ok, list, err = pcall(t.list, root, ctx or {})
   if not ok or type(list) ~= "table" then
-    notify('cannot list "' .. t.name .. '": ' .. tostring(list), vim.log.levels.WARN)
-    return {}
+    notify('cannot list "' .. t.name .. '": ' .. tostring(ok and err or list), vim.log.levels.WARN)
+    return {}, true
   end
   return list
 end
@@ -162,12 +168,20 @@ end
 local function pick_generic(root, on_pick)
   local headless = require("agent-poke.headless")
   local items = {}
+  local list_failed = false
   for _, t in ipairs(M.targets) do
-    for _, e in ipairs(entries_of(t, root)) do
-      items[#items + 1] = { target = t, entry = e, title = tostring(e.title or e.id) }
+    local list, failed = entries_of(t, root)
+    list_failed = list_failed or failed or false
+    for _, e in ipairs(list) do
+      items[#items + 1] = { target = t, entry = e, title = tostring(e.label or e.title or e.id) }
     end
   end
-  items[#items + 1] = { title = vim.fs.basename(headless.command()) .. " (background)" }
+  if headless.available() then
+    items[#items + 1] = { title = vim.fs.basename(headless.command()) .. " (background)" }
+  end
+  if #items == 0 then
+    return notify("no agent to poke: " .. headless.command() .. " not found; set config.headless.cmd", vim.log.levels.WARN)
+  end
   local function choose(item)
     if not item then
       return
@@ -183,18 +197,27 @@ local function pick_generic(root, on_pick)
       remember(root, value)
     end
   end
-  if #items == 1 then -- only the background agent: nothing to choose
+  if #items == 1 and not items[1].target and not list_failed then -- only the background agent: nothing to choose
     if not on_pick then
       notify("the background agent is the only target; no other agent to choose")
     end
     return choose(items[1])
   end
-  vim.ui.select(items, {
-    prompt = "Poke which agent?",
-    format_item = function(i)
-      return i.title
-    end,
-  }, choose)
+  local function open()
+    vim.ui.select(items, {
+      prompt = "Poke which agent?",
+      format_item = function(i)
+        return i.title
+      end,
+    }, choose)
+  end
+  -- From insert mode (a mapping) its `stopinsert` only applies after the mapping
+  -- returns and would knock a picker opened meanwhile out of its input.
+  if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
+    vim.schedule(open)
+  else
+    open()
+  end
 end
 
 ---Poke root's agent with `prompt`: the remembered target entry, else the background agent.
@@ -202,10 +225,6 @@ end
 ---@return "started"|"queued"|"typed"|"forked"|false
 function M.poke(root, prompt, opts)
   opts = opts or {}
-  local t = takeover("poke")
-  if t then
-    return t.poke(root, prompt, opts)
-  end
   if #M.targets == 0 then
     return background(root, prompt, opts)
   end
@@ -224,12 +243,16 @@ function M.poke(root, prompt, opts)
   local saved = require("agent-poke.state").get(root).target
   local target = type(saved) == "table" and saved.target and find_target(saved.target)
   if target then
-    for _, e in ipairs(entries_of(target, root)) do
+    local ctx = {} -- list and deliver share one deadline
+    local list, failed = entries_of(target, root, ctx)
+    for _, e in ipairs(list) do
       if e.id == saved.id then
-        return deliver(target, root, e, prompt, opts)
+        return deliver(target, root, e, prompt, opts, ctx)
       end
     end
-    notify("the agent you used before is gone; the background agent gets the prompt", vim.log.levels.WARN)
+    if not failed then -- a failed list already said why
+      notify("the agent you used before is gone; the background agent gets the prompt", vim.log.levels.WARN)
+    end
   end
   return background(root, prompt, opts)
 end
@@ -246,10 +269,6 @@ end
 
 ---Choose root's agent (the targets' entries and the background agent).
 function M.pick(root, on_pick)
-  local t = takeover("pick")
-  if t then
-    return t.pick(root, on_pick)
-  end
   pick_generic(root, on_pick)
 end
 

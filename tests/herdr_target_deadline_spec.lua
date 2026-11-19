@@ -1,17 +1,17 @@
--- agent-poke_nvim-3am, review finding (blocker, herdr.lua:355): with
--- config.agent = "herdr" and the remembered pane gone, poke() lists the agents,
--- finds the pane missing and opens the picker. The editor must be blocked at
--- most TIMEOUT_MS in total before the picker opens (not one list per step with
--- a fresh TIMEOUT_MS each), and the picker must offer the agents herdr listed.
+-- agent-poke_nvim-0d8.2: one deadline for a poke step through the core API.
+-- With herdr as a target, core's poke() lists the target's entries and then
+-- calls its deliver(): together these herdr calls block the editor for at
+-- most TIMEOUT_MS, not TIMEOUT_MS each. A failure is reported once, with the
+-- prompt kept in the " register.
 --
--- herdr.TIMEOUT_MS is shortened to 1500 ms here. The fake `herdr` sleeps 1.3 s
--- (just under the timeout) before each answer, so two chained calls take ~2.6 s.
--- On SIGTERM it kills its sleep and exits, so no child is left behind.
+-- herdr.TIMEOUT_MS is shortened to 1500 ms. The fake `herdr` sleeps 1.3 s
+-- before each answer (list + prompt chained: ~2.6 s). On SIGTERM it kills its
+-- sleep and exits, so no child is left behind.
 local uv = vim.uv or vim.loop
 
 local TIMEOUT = 1500
 local DELAY = "1.3"
-local SLACK = 400 -- ms allowed beyond TIMEOUT for process start and bookkeeping
+local SLACK = 400
 
 local function read(path)
   local f = io.open(path, "rb")
@@ -84,13 +84,17 @@ local function install()
   return self
 end
 
-local function ms_since(t0)
-  return (uv.hrtime() - t0) / 1e6
+local function unload()
+  for name in pairs(package.loaded) do
+    if name == "agent-poke" or name:match("^agent%-poke%.") then
+      package.loaded[name] = nil
+    end
+  end
 end
 
-describe("agent-poke.herdr re-pick when the remembered pane is gone (agent = herdr)", function()
-  local herdr, state, headless, fakes, notes, offered, selected_at
-  local saved_env, old_notify, old_select, old_timeout
+describe("herdr target: one deadline per poke() through core", function()
+  local ap, herdr, state, fakes, notes
+  local saved_env, old_notify, old_select
 
   before_each(function()
     saved_env = {
@@ -104,49 +108,28 @@ describe("agent-poke.herdr re-pick when the remembered pane is gone (agent = her
     vim.env.PATH = fakes.bin .. ":/usr/bin:/bin"
     vim.env.HERDR_SOCKET_PATH = vim.fn.tempname() .. ".sock"
     vim.env.HERDR_PANE_ID = "w1:p5"
-
     old_notify = vim.notify
     notes = {}
     vim.notify = function(msg, level)
       notes[#notes + 1] = { msg = tostring(msg), level = level }
     end
     old_select = vim.ui.select
-    offered, selected_at = nil, nil
-    vim.ui.select = function(items, opts, cb)
-      selected_at = uv.hrtime()
-      offered = {}
-      for _, item in ipairs(items) do
-        local label = opts and opts.format_item and opts.format_item(item) or tostring(item.title)
-        offered[#offered + 1] = tostring(label)
-      end
-      cb(nil) -- cancel: no further herdr call is started
+    vim.ui.select = function(_, _, cb)
+      cb(nil)
     end
-
-    require("agent-poke").setup({ targets = { "herdr" }, isolate = false, agent = "herdr" })
+    unload()
+    ap = require("agent-poke")
+    ap.config = require("agent-poke.defaults")()
+    ap.setup({ targets = { herdr = { isolate = false } } })
     state = require("agent-poke.state")
-    headless = require("agent-poke.headless")
     herdr = require("agent-poke.targets.herdr")
-    old_timeout = herdr.TIMEOUT_MS
     herdr.TIMEOUT_MS = TIMEOUT
-
     fakes.agents({
-      {
-        pane_id = "w1:p1",
-        agent = "claude",
-        agent_status = "idle",
-        cwd = new_dir(),
-        terminal_title_stripped = "Review PR",
-      },
+      { pane_id = "w1:p1", agent = "claude", agent_status = "idle", cwd = new_dir(), terminal_title_stripped = "Review PR" },
     })
   end)
 
   after_each(function()
-    if herdr then
-      herdr.TIMEOUT_MS = old_timeout
-    end
-    if headless then
-      headless.stop_all()
-    end
     if fakes then
       vim.wait(5000, function()
         return not fakes.pending()
@@ -158,27 +141,26 @@ describe("agent-poke.herdr re-pick when the remembered pane is gone (agent = her
     for k, v in pairs(saved_env) do
       vim.env[k] = v
     end
-    require("agent-poke").config = require("agent-poke.defaults")()
+    unload()
   end)
 
-  it("at most TIMEOUT_MS before the picker opens, and it offers the listed agents", function()
-    local root = new_dir()
-    state.set(root, "target", { pane_id = "w1:p9", title = "Gone agent" }) -- not in herdr's list
+  it("list + deliver for a stored herdr entry block at most TIMEOUT_MS in total; a timeout is one notice", function()
+    local r = new_dir()
+    state.set(r, "target", { target = "herdr", id = "w1:p1" })
+    vim.fn.setreg('"', "something else")
     local t0 = uv.hrtime()
-    local res = herdr.poke(root, "please check the comments")
-    local took = ms_since(t0)
-    assert.is_not_nil(selected_at, string.format("the picker did not open (poke() returned %s after %d ms); notes: %s",
-      tostring(res), took, vim.inspect(notes)))
-    local before = (selected_at - t0) / 1e6
-    assert.is_true(before <= TIMEOUT + SLACK,
-      string.format("picker opened after %d ms, more than TIMEOUT_MS (%d) + %d; notes: %s",
-        before, TIMEOUT, SLACK, vim.inspect(notes)))
-    local found = false
-    for _, label in ipairs(offered) do
-      if label:find("Review PR", 1, true) then
-        found = true
-      end
+    local status = ap.poke(r, "please check the comments")
+    local took = (uv.hrtime() - t0) / 1e6
+    assert.is_true(took <= TIMEOUT + SLACK,
+      string.format("poke() blocked %d ms, more than TIMEOUT_MS (%d) + %d; notes: %s", took, TIMEOUT, SLACK, vim.inspect(notes)))
+    if status then -- only if the step needed a single herdr call
+      assert.are.equal("typed", status)
+      return
     end
-    assert.is_true(found, "the picker did not offer the listed agent; offered: " .. vim.inspect(offered))
+    local errs = vim.tbl_filter(function(n)
+      return (n.level or vim.log.levels.INFO) >= vim.log.levels.ERROR
+    end, notes)
+    assert.are.equal(1, #errs, "one notice per failed delivery; got: " .. vim.inspect(notes))
+    assert.are.equal("please check the comments", vim.fn.getreg('"'))
   end)
 end)

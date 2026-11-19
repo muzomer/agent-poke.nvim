@@ -3,7 +3,6 @@
 ---is chosen once per root in a picker and remembered with agent-poke.state; the
 ---background agent (agent-poke.headless) is offered in the picker and is the
 ---fallback when herdr or the chosen pane is gone.
-local state = require("agent-poke.state")
 local headless = require("agent-poke.headless")
 
 local M = {}
@@ -12,8 +11,6 @@ M.name = "herdr"
 M.legacy_auto = true -- config.agent = "auto" enables this target
 
 M.TIMEOUT_MS = 8000
-
-M.HEADLESS = "headless" -- pane_id of the background agent in a stored target
 
 M.STYLE = {
   subagent = "Handle this in a subagent (Task tool) so this conversation stays small: give it this whole message."
@@ -28,6 +25,14 @@ end
 
 local function config()
   return require("agent-poke").config
+end
+
+---Options of this adapter (setup({ targets = { herdr = { isolate = ... } } })).
+M.opts = {}
+
+---Called by setup() each time the target is enabled.
+function M.configure(opts)
+  M.opts = type(opts) == "table" and opts or {}
 end
 
 ---Why a herdr call failed, from its result.
@@ -110,6 +115,7 @@ local function agent_list(res)
   for _, a in ipairs(result.agents or {}) do
     if a.pane_id ~= own then
       list[#list + 1] = {
+        id = a.pane_id,
         pane_id = a.pane_id,
         title = a.terminal_title_stripped or a.terminal_title or a.agent or a.pane_id,
         status = a.agent_status or "?",
@@ -186,85 +192,6 @@ function M.session_of(target)
   end
 end
 
--- Picking ------------------------------------------------------------------------------
-
-local function background_target()
-  return { pane_id = M.HEADLESS, title = vim.fs.basename(headless.command()) .. " (background)" }
-end
-
-local function remember(root, t)
-  local ok, err = pcall(state.set, root, "target", { pane_id = t.pane_id, title = t.title })
-  if not ok then
-    notify("could not remember the agent: " .. tostring(err), vim.log.levels.ERROR)
-  end
-end
-
-local function offer(root, agents, on_pick, list_err)
-  local items = vim.list_extend({}, agents)
-  if config().agent ~= "herdr" and headless.available() then
-    local h = background_target()
-    h.status = headless.session_id(root) and "resume" or "new"
-    h.cwd = "runs without a terminal"
-    items[#items + 1] = h
-  end
-  if #items == 0 then
-    return notify("no other agent is running in herdr", vim.log.levels.WARN)
-  end
-  local function choose(choice)
-    if not choice then
-      return
-    end
-    if not on_pick then
-      return remember(root, choice)
-    end
-    local ok, res = pcall(on_pick, choice)
-    if not ok then
-      notify("poke failed: " .. tostring(res), vim.log.levels.ERROR)
-    elseif res then -- stored only once the prompt was delivered
-      remember(root, choice)
-    end
-  end
-  if #items == 1 and #agents == 0 and not list_err and config().agent ~= "herdr" then -- nothing to choose from
-    return choose(items[1])
-  end
-  local function open()
-    vim.ui.select(items, {
-      prompt = "Poke which agent?",
-      format_item = function(a)
-        return string.format("%-40s %-8s %s", a.title, a.status or "", a.cwd or "")
-      end,
-    }, choose)
-  end
-  -- Opened from insert mode (a mapping), its `stopinsert` only applies after the
-  -- mapping returns and would knock a picker that opened meanwhile out of its
-  -- input: open it after that.
-  if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
-    vim.schedule(open)
-  else
-    open()
-  end
-end
-
----Let the user choose the agent to poke for `root`: the agents running in herdr
----(this pane left out) plus the background agent. The choice is remembered per root.
----@param on_pick? fun(target: table): any called with the choice; the choice is
----remembered when it returns a truthy value (without on_pick: at once)
----@param listed? table[] agents the caller has just listed: not listed again
-function M.pick(root, on_pick, listed)
-  if not M.available() then
-    return offer(root, {}, on_pick)
-  end
-  local agents, err = listed, nil
-  if not agents then
-    agents, err = list_agents()
-  end
-  if not agents then
-    notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
-    agents = {}
-  end
-  offer(root, agents, on_pick, err)
-end
-
 -- Sending ------------------------------------------------------------------------------
 
 ---Run fn with vim.notify captured; returns the messages and fn's results.
@@ -330,7 +257,10 @@ end
 ---isolate = "fork" and it can fork, else typed into its pane.
 ---@return "typed"|"forked"|"queued"|false
 local function deliver(root, prompt, target, opts, deadline)
-  local isolate = config().isolate
+  local isolate = M.opts.isolate
+  if isolate == nil then
+    isolate = config().isolate
+  end
   if isolate == nil then
     isolate = "fork"
   end
@@ -356,68 +286,35 @@ local function deliver(root, prompt, target, opts, deadline)
   return fail(target.title, prompt, err)
 end
 
----Choose an agent now and deliver to it. Returns the status when the choice is
----made at once; false while a picker is still open.
-local function pick_and_deliver(root, prompt, opts, listed)
-  local result = false
-  M.pick(root, function(target)
-    if target.pane_id == M.HEADLESS then
-      result = background(root, prompt, nil, opts)
-      return result
-    else
-      -- the picker listed the agents just now: no second list; the time
-      -- from the choice on has a deadline of its own
-      result = deliver(root, prompt, target, opts, new_deadline())
-      return result
-    end
-  end, listed)
-  return result
-end
+---Target interface ---------------------------------------------------------------
+---`ctx` is shared by the calls of one poke step (list, then deliver): the
+---synchronous herdr calls together block for at most TIMEOUT_MS.
 
-local function poke_unsafe(root, prompt, opts)
-  local mode = config().agent or "auto"
-  if mode == "headless" or (mode == "auto" and not M.available()) then
-    return background(root, prompt, nil, opts)
-  end
+---Agents running in herdr (this pane left out); nothing when herdr is not here.
+---@return table[]? entries, string? err
+function M.list(_, ctx)
   if not M.available() then
-    notify("herdr is not running here (config.agent = \"herdr\")", vim.log.levels.ERROR)
-    return false
+    return {}
   end
-  local saved = not opts.pick and state.get(root).target or nil
-  if type(saved) ~= "table" or not saved.pane_id then
-    return pick_and_deliver(root, prompt, opts)
+  if ctx then
+    ctx.deadline = ctx.deadline or new_deadline()
   end
-  if saved.pane_id == M.HEADLESS then
-    return background(root, prompt, nil, opts)
-  end
-  local deadline = new_deadline() -- list and prompt together
-  local agents, err = list_agents(deadline)
-  if not agents then -- herdr hiccup: the prompt must not get lost
-    notify("cannot list agents: " .. tostring(err), vim.log.levels.WARN)
-    return mode == "auto" and background(root, prompt, nil, opts) or false
+  local agents, err = list_agents(ctx and ctx.deadline)
+  if not agents then
+    return nil, err
   end
   for _, a in ipairs(agents) do
-    if a.pane_id == saved.pane_id then
-      return deliver(root, prompt, a, opts, deadline) -- the live record: its session may have changed
-    end
+    a.label = string.format("%-40s %-8s %s", a.title, a.status or "", a.cwd or "")
   end
-  if mode == "auto" then
-    notify("the agent you used before is gone; the background agent gets the prompt", vim.log.levels.WARN)
-    return background(root, prompt, nil, opts)
-  end
-  notify("the agent you used before is gone; choose another", vim.log.levels.WARN)
-  return pick_and_deliver(root, prompt, opts, agents) -- already listed: no second list
+  return agents
 end
 
----Poke root's agent with `prompt`: the remembered one, else one picked now.
----Without herdr, or when the remembered pane is gone, the background agent gets it.
----opts: { cwd?, dirs?, env?, on_start?, pick? }, see the README.
----@return "started"|"queued"|"typed"|"forked"|false
-function M.poke(root, prompt, opts)
-  local ok, res = pcall(poke_unsafe, root, prompt, opts or {})
+---Deliver `prompt` to a listed entry. A failure is reported here, once.
+---@return "typed"|"forked"|"queued"|false
+function M.deliver(root, entry, prompt, opts, ctx)
+  local ok, res = pcall(deliver, root, prompt, entry, opts or {}, ctx and (ctx.deadline or new_deadline()) or new_deadline())
   if not ok then
-    notify("poke failed: " .. tostring(res), vim.log.levels.ERROR)
-    return false
+    return fail(entry.title or "the agent", prompt, res)
   end
   return res
 end
