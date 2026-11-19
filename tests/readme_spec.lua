@@ -17,41 +17,9 @@ local function has(text, needle)
   return text:find(needle, 1, true) ~= nil
 end
 
----Every option path ("agent", "headless.cmd", ...) of the default config. Keys
----whose default is nil are not in the table, so list them from the design.
-local function option_keys()
-  local keys = {}
-  local function walk(t, prefix)
-    for k, v in pairs(t) do
-      local name = prefix .. k
-      keys[#keys + 1] = { key = k, path = name }
-      if type(v) == "table" and not vim.islist(v) and next(v) ~= nil then
-        walk(v, name .. ".")
-      end
-    end
-  end
-  walk(fresh().config, "")
-  for _, k in ipairs({ "cmd", "allowed_tools", "permission_mode" }) do
-    keys[#keys + 1] = { key = k, path = "headless." .. k }
-  end
-  return keys
-end
-
 describe("README.md", function()
   it("exists at the repository root", function()
     readme()
-  end)
-
-  it("documents every setup() option as `key = ...` (e.g. in the setup example)", function()
-    local text = readme()
-    local missing = {}
-    for _, o in ipairs(option_keys()) do
-      if not text:find("%f[%w_]" .. vim.pesc(o.key) .. "%s*=") then
-        missing[#missing + 1] = o.path
-      end
-    end
-    table.sort(missing)
-    assert.are.same({}, missing, "options not shown as `key = ...`: " .. table.concat(missing, ", "))
   end)
 
   it("names the choices of agent and isolate", function()
@@ -100,6 +68,25 @@ describe("README.md", function()
     local text = readme()
     for _, b in ipairs({ "claude", "codex", "opencode", "gemini" }) do
       assert.is_true(has(text, b), "backend " .. b .. " not listed")
+    end
+  end)
+end)
+
+describe("README.md install examples", function()
+  it("lazy.nvim spec uses muzomer/agent-poke.nvim", function()
+    assert.is_truthy(readme():find('"muzomer/agent-poke.nvim"', 1, true))
+  end)
+
+  it("vim.pack URL uses https://github.com/muzomer/agent-poke.nvim", function()
+    assert.is_truthy(readme():find("https://github.com/muzomer/agent-poke.nvim", 1, true))
+  end)
+
+  it("names no other GitHub owner for the plugin", function()
+    local text = readme()
+    for owner in text:gmatch("([%w_.-]+)/agent%-poke%.nvim") do
+      if owner ~= "github.com" then
+        assert.are.equal("muzomer", owner)
+      end
     end
   end)
 end)

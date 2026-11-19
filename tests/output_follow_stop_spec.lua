@@ -8,25 +8,9 @@
 --
 -- Fakes (test doubles): `claude` with -p prints "line one from fake run N",
 -- waits (at most ~5 s) for <log>/release, prints "after the gate from fake run
--- N" and a result. PATH holds only the fake and /usr/bin:/bin; herdr is absent.
+-- N" and a result. the fake is first on PATH; herdr is not used.
+local helpers = require("tests.helpers")
 local uv = vim.uv or vim.loop
-
-local function read(path)
-  local f = io.open(path, "rb")
-  if not f then
-    return nil
-  end
-  local s = f:read("a")
-  f:close()
-  return s
-end
-
-local function write(path, text)
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-  local f = assert(io.open(path, "wb"))
-  f:write(text)
-  f:close()
-end
 
 local function new_dir()
   local d = vim.fn.tempname()
@@ -34,10 +18,11 @@ local function new_dir()
   return uv.fs_realpath(d)
 end
 
-local CLAUDE = [[#!/bin/sh
-log="%s"
-n=$(cat "$log/claude.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log/claude.n"
-d="$log/claude.$n"; mkdir -p "$d"
+-- Body of the fake `claude` (runs after the install_fakes prelude, which
+-- sets $log, $d and $n): with -p it prints "line one from fake run N", waits
+-- (at most ~5 s) for <log>/release, prints "after the gate from fake run N" and
+-- a result, then touches $d/done.
+local CLAUDE_BODY = [[
 sid=fake-session; prev=; p=
 for a in "$@"; do
   if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid=$a; fi
@@ -45,12 +30,12 @@ for a in "$@"; do
   prev=$a
 done
 if [ -n "$p" ]; then
-  printf '%%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
-  printf '%%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"line one from fake run $n\"}]}}"
+  printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"line one from fake run $n\"}]}}"
   i=0
   while [ ! -f "$log/release" ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
-  printf '%%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"after the gate from fake run $n\"}]}}"
-  printf '%%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT-TEXT\",\"session_id\":\"$sid\"}"
+  printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"after the gate from fake run $n\"}]}}"
+  printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"RESULT-TEXT\",\"session_id\":\"$sid\"}"
 fi
 touch "$d/done"
 ]]
@@ -66,17 +51,7 @@ local function active_timers()
 end
 
 describe("output window follows runs and keeps stopped text", function()
-  local ap, headless, log, saved_env, old_notify, notes, first_win
-
-  local function runs_done()
-    local n = tonumber(vim.trim(read(log .. "/claude.n") or "0")) or 0
-    for i = 1, n do
-      if not uv.fs_stat(log .. "/claude." .. i .. "/done") then
-        return false
-      end
-    end
-    return true
-  end
+  local ap, headless, fakes, log, saved_env, old_notify, notes, first_win
 
   before_each(function()
     saved_env = {
@@ -86,15 +61,9 @@ describe("output window follows runs and keeps stopped text", function()
       HERDR_PANE_ID = vim.env.HERDR_PANE_ID,
       CLAUDE_CONFIG_DIR = vim.env.CLAUDE_CONFIG_DIR,
     }
-    local dir = vim.fn.tempname()
-    local bin = dir .. "/bin"
-    log = dir .. "/log"
-    vim.fn.mkdir(bin, "p")
-    vim.fn.mkdir(log, "p")
-    write(bin .. "/claude", string.format(CLAUDE, log))
-    uv.fs_chmod(bin .. "/claude", tonumber("755", 8))
+    fakes = helpers.install_fakes({ bodies = { claude = CLAUDE_BODY } })
+    log = fakes.log
     vim.env.XDG_STATE_HOME = vim.fn.tempname()
-    vim.env.PATH = bin .. ":/usr/bin:/bin"
     vim.env.HERDR_SOCKET_PATH = nil
     vim.env.HERDR_PANE_ID = nil
     vim.env.CLAUDE_CONFIG_DIR = new_dir()
@@ -111,9 +80,9 @@ describe("output window follows runs and keeps stopped text", function()
   end)
 
   after_each(function()
-    write(log .. "/release", "")
+    fakes.flag("release")
     headless.stop_all()
-    vim.wait(6000, runs_done, 20)
+    vim.wait(6000, fakes.all_done, 20)
     vim.wait(100)
     if vim.api.nvim_win_is_valid(first_win) then
       pcall(vim.api.nvim_set_current_win, first_win)
@@ -125,6 +94,7 @@ describe("output window follows runs and keeps stopped text", function()
     end
     -- let any output timer notice its window is gone
     vim.wait(require("agent-poke.output").interval * 3 + 100)
+    fakes.restore()
     vim.notify = old_notify
     for k, v in pairs(saved_env) do
       vim.env[k] = v
@@ -204,7 +174,7 @@ describe("output window follows runs and keeps stopped text", function()
     assert.is_true(vim.api.nvim_win_is_valid(w), "the window was closed")
     assert.is_true(headless.running(root), "the run finished before the window could be judged as streaming")
 
-    write(log .. "/release", "")
+    fakes.flag("release")
     wait_for("the later text in the already open window", function()
       return win_text(w):find("after the gate from fake run 1", 1, true) ~= nil
     end, function()
@@ -214,10 +184,10 @@ describe("output window follows runs and keeps stopped text", function()
 
   it("a window left open after a finished run shows the next run without reopening", function()
     local root = new_dir()
-    write(log .. "/release", "")
+    fakes.flag("release")
     ap.poke(root, "first")
     wait_for("the first run to finish", function()
-      return not headless.running(root) and runs_done()
+      return not headless.running(root) and fakes.all_done()
     end)
     local w = open_output(root)
     assert.is_truthy(win_text(w):find("after the gate from fake run 1", 1, true), win_text(w))
@@ -230,7 +200,7 @@ describe("output window follows runs and keeps stopped text", function()
     end, function()
       return win_text(w)
     end)
-    write(log .. "/release", "")
+    fakes.flag("release")
     wait_for("the second run's later text in the open window", function()
       return win_text(w):find("after the gate from fake run 2", 1, true) ~= nil
     end, function()
@@ -312,9 +282,9 @@ describe("output window follows runs and keeps stopped text", function()
     w = open_output(root)
     vim.wait(interval * 2 + 50)
     vim.api.nvim_win_close(w, true)
-    write(log .. "/release", "")
+    fakes.flag("release")
     wait_for("the run to finish", function()
-      return not headless.running(root) and runs_done()
+      return not headless.running(root) and fakes.all_done()
     end)
     wait_for("timers back to the baseline after the run and window are gone", function()
       return active_timers() <= base

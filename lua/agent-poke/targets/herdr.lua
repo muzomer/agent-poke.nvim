@@ -20,9 +20,7 @@ M.STYLE = {
     .. " nothing you say here is kept, so put everything that matters into your actions. End with one line only.",
 }
 
-local function notify(msg, level)
-  vim.notify("agent-poke: " .. msg, level or vim.log.levels.INFO)
-end
+local notify = require("agent-poke.util").notify
 
 local function config()
   return require("agent-poke").config

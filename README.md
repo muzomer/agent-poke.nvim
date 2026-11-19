@@ -6,7 +6,7 @@ resumable conversation per project root. [herdr](https://herdr.dev) is an
 opt-in target: enable it with `targets = { "herdr" }` to poke an agent running
 in herdr instead.
 
-Requires Neovim 0.10+. No autocmds or mappings are created until you call `require("agent-poke").setup()`.
+Requires Neovim 0.10+. No mappings are created. A `VimLeavePre` autocmd (stops background runs on exit) is created on the first background use, or at `setup()` when the herdr target is on.
 
 ## Install
 
@@ -149,7 +149,8 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   target is enabled) and the background agent; the choice is remembered for the root.
 - `output(root)`: a second call closes the window. It refreshes while the run
   is in flight.
-- `chat(root)`: resumes the stored session with the agent's own CLI; needs a
+- `chat(root)`: resumes the stored session with the agent's own CLI (gemini runs
+  `gemini -r latest`, not the stored session); needs a
   session (poke first) and no run in flight.
 - `stop(root)`: stops the run; notifies when there is none.
 - `config`: the current configuration table.

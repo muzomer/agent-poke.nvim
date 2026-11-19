@@ -11,7 +11,7 @@ local function new_root()
   return (vim.fn.fnamemodify(d, ":p"):gsub("/$", ""))
 end
 
-describe("agent-poke.headless review findings", function()
+describe("agent-poke.headless error events and failing state writes", function()
   local headless, state, old_state_home, old_notify, old_spawn, old_set, notes, spawns, roots
 
   before_each(function()

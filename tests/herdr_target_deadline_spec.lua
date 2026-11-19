@@ -8,27 +8,11 @@
 -- before each answer (list + prompt chained: ~2.6 s). On SIGTERM it kills its
 -- sleep and exits, so no child is left behind.
 local uv = vim.uv or vim.loop
+local helpers = require("tests.helpers")
 
 local TIMEOUT = 1500
 local DELAY = "1.3"
 local SLACK = 400
-
-local function read(path)
-  local f = io.open(path, "rb")
-  if not f then
-    return nil
-  end
-  local s = f:read("a")
-  f:close()
-  return s
-end
-
-local function write(path, text)
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-  local f = assert(io.open(path, "wb"))
-  f:write(text)
-  f:close()
-end
 
 local function new_dir()
   local d = vim.fn.tempname()
@@ -36,53 +20,26 @@ local function new_dir()
   return uv.fs_realpath(d)
 end
 
-local HERDR = [[#!/bin/sh
-log="%s"
-n=$(cat "$log/herdr.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log/herdr.n"
-d="$log/herdr.$n"; mkdir -p "$d"
-printf '%%s ' "$@" > "$d/argv"
+-- Sleeps DELAY before answering; on SIGTERM kills the sleep and exits.
+local HERDR_BODY = [[
 pid=
 trap 'if [ -n "$pid" ]; then kill "$pid" 2>/dev/null; fi; touch "$d/done"; exit 143' TERM INT
-sleep %s &
+sleep ]]..DELAY..[[ &
 pid=$!
 wait "$pid"
 if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
   cat "$log/agents.json"
 else
-  printf '%%s\n' '{"result":{"ok":true}}'
+  printf '%s\n' '{"result":{"ok":true}}'
 fi
 touch "$d/done"
 ]]
 
-local CLAUDE = [[#!/bin/sh
+local CLAUDE_BODY = [[
 printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session"}'
 printf '%s\n' '{"type":"result","subtype":"success","result":"ok","session_id":"fake-session"}'
+touch "$d/done"
 ]]
-
-local function install()
-  local dir = vim.fn.tempname()
-  local bin, log = dir .. "/bin", dir .. "/log"
-  vim.fn.mkdir(bin, "p")
-  vim.fn.mkdir(log, "p")
-  write(bin .. "/herdr", string.format(HERDR, log, DELAY))
-  write(bin .. "/claude", CLAUDE)
-  uv.fs_chmod(bin .. "/herdr", tonumber("755", 8))
-  uv.fs_chmod(bin .. "/claude", tonumber("755", 8))
-  local self = { bin = bin, log = log }
-  function self.pending()
-    local n = tonumber(vim.trim(read(log .. "/herdr.n") or "0")) or 0
-    for i = 1, n do
-      if not uv.fs_stat(log .. "/herdr." .. i .. "/done") then
-        return true
-      end
-    end
-    return false
-  end
-  function self.agents(list)
-    write(log .. "/agents.json", vim.json.encode({ result = { agents = list } }))
-  end
-  return self
-end
 
 local function unload()
   for name in pairs(package.loaded) do
@@ -104,7 +61,7 @@ describe("herdr target: one deadline per poke() through core", function()
       HERDR_PANE_ID = vim.env.HERDR_PANE_ID,
     }
     vim.env.XDG_STATE_HOME = vim.fn.tempname()
-    fakes = install()
+    fakes = helpers.install_fakes({ bodies = { herdr = HERDR_BODY, claude = CLAUDE_BODY } })
     vim.env.PATH = fakes.bin .. ":/usr/bin:/bin"
     vim.env.HERDR_SOCKET_PATH = vim.fn.tempname() .. ".sock"
     vim.env.HERDR_PANE_ID = "w1:p5"
@@ -132,7 +89,7 @@ describe("herdr target: one deadline per poke() through core", function()
   after_each(function()
     if fakes then
       vim.wait(5000, function()
-        return not fakes.pending()
+        return fakes.all_done()
       end, 20)
       vim.wait(100)
     end

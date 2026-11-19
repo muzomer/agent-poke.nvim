@@ -7,7 +7,7 @@ return function()
       cmd = nil, -- its executable (default: the agent's own)
       allowed_tools = nil, -- claude: replaces the default tool list
       extra_tools = {}, -- claude: rules added to the default list
-      permission_mode = nil, -- claude: --permission-mode; codex: --sandbox; gemini: --approval-mode
+      permission_mode = nil, -- claude: --permission-mode; codex: --sandbox; gemini: --approval-mode; opencode: "auto" adds --auto
       args = {}, -- extra arguments for every run
     },
   }

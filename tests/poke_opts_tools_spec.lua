@@ -7,6 +7,7 @@
 --
 -- The fakes and harness below are copied from tests/poke_opts_spec.lua.
 local uv = vim.uv or vim.loop
+local helpers = require("tests.helpers")
 
 local function read(path)
   local f = io.open(path, "rb")
@@ -30,21 +31,6 @@ local function new_dir()
   vim.fn.mkdir(d, "p")
   return uv.fs_realpath(d)
 end
-
-local RECORD = [[#!/bin/sh
-log="%s"
-name="%s"
-n=$(cat "$log/$name.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log/$name.n"
-d="$log/$name.$n"; mkdir -p "$d"
-: > "$d/argv.tmp"
-for a in "$@"; do printf '%%s\0' "$a" >> "$d/argv.tmp"; done
-mv "$d/argv.tmp" "$d/argv"
-pwd -P > "$d/cwd"
-printf '%%s' "${AP_TEST_VAR-<unset>}" > "$d/ap_test_var"
-printf '%%s' "${XDG_STATE_HOME-<unset>}" > "$d/xdg_state_home"
-printf '%%s' "${PATH-<unset>}" > "$d/path"
-%s
-]]
 
 local HERDR_BODY = [[
 if [ "$1" = "agent" ] && [ "$2" = "list" ]; then
@@ -86,48 +72,6 @@ touch "$d/done"
 ]]
 
 local NAMES = { "herdr", "claude", "gemini" }
-
-local function install()
-  local dir = vim.fn.tempname()
-  local bin, log = dir .. "/bin", dir .. "/log"
-  vim.fn.mkdir(bin, "p")
-  vim.fn.mkdir(log, "p")
-  for name, body in pairs({ herdr = HERDR_BODY, claude = CLAUDE_BODY, gemini = GEMINI_BODY }) do
-    write(bin .. "/" .. name, string.format(RECORD, log, name, body))
-    uv.fs_chmod(bin .. "/" .. name, tonumber("755", 8))
-  end
-  local self = { bin = bin, log = log }
-  function self.calls(name)
-    local list = {}
-    local n = tonumber(vim.trim(read(log .. "/" .. name .. ".n") or "0")) or 0
-    for i = 1, n do
-      local d = log .. "/" .. name .. "." .. i
-      local raw = read(d .. "/argv")
-      if raw then
-        local argv = {}
-        for a in raw:gmatch("([^%z]*)%z") do
-          argv[#argv + 1] = a
-        end
-        list[#list + 1] = {
-          argv = argv,
-          cwd = vim.trim(read(d .. "/cwd") or ""),
-          ap_test_var = read(d .. "/ap_test_var"),
-          xdg_state_home = read(d .. "/xdg_state_home"),
-          path = read(d .. "/path"),
-          done = uv.fs_stat(d .. "/done") ~= nil,
-        }
-      end
-    end
-    return list
-  end
-  function self.agents(list)
-    write(log .. "/agents.json", vim.json.encode({ result = { agents = list } }))
-  end
-  function self.flag(name)
-    write(log .. "/" .. name, "")
-  end
-  return self
-end
 
 local OWN = "w1:p5" -- the pane this Neovim runs in
 
@@ -175,7 +119,7 @@ describe("agent-poke poke() opts.tools", function()
       AP_TEST_VAR = vim.env.AP_TEST_VAR,
     }
     vim.env.XDG_STATE_HOME = vim.fn.tempname()
-    fakes = install()
+    fakes = helpers.install_fakes({ bodies = { herdr = HERDR_BODY, claude = CLAUDE_BODY, gemini = GEMINI_BODY }, env = true })
     vim.env.PATH = fakes.bin .. ":/usr/bin:/bin"
     vim.env.HERDR_SOCKET_PATH = nil -- no herdr unless a test sets it
     vim.env.HERDR_PANE_ID = OWN

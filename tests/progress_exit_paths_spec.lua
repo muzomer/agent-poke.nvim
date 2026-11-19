@@ -18,7 +18,7 @@ local function unload()
   end
 end
 
-describe("agent-poke progress findings", function()
+describe("agent-poke progress: exit paths", function()
   local ap, headless, state, old_get, old_state_home, old_notify, spawns, events, group
 
   before_each(function()

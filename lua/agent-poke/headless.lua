@@ -20,14 +20,9 @@ local function cfg()
   return require("agent-poke").config.headless or {}
 end
 
-local function notify(msg, level)
-  vim.notify("agent-poke: " .. msg, level or vim.log.levels.INFO)
-end
+local notify = require("agent-poke.util").notify
 
-local function one_line(s, max)
-  s = tostring(s or ""):gsub("%s+", " ")
-  return #s > max and (s:sub(1, max - 1) .. "…") or s
-end
+local one_line = require("agent-poke.util").one_line
 
 local function text_lines(text)
   text = vim.trim(tostring(text or ""))

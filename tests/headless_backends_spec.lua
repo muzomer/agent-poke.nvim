@@ -7,6 +7,7 @@
 -- Fake codex / opencode / gemini / claude (test doubles) record their argv and
 -- print the event that carries the session id.
 local uv = vim.uv or vim.loop
+local helpers = require("tests.helpers")
 
 local function new_root()
   local d = vim.fn.tempname()
@@ -14,85 +15,34 @@ local function new_root()
   return (vim.fn.fnamemodify(d, ":p"):gsub("/$", ""))
 end
 
-local function read(path)
-  local f = io.open(path, "rb")
-  if not f then
-    return nil
-  end
-  local s = f:read("a")
-  f:close()
-  return s
-end
-
-local function write(path, text)
-  local f = assert(io.open(path, "wb"))
-  f:write(text)
-  f:close()
-end
-
-local SCRIPT = [[#!/bin/sh
-log="%s/%s"
-n=$(cat "$log.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log.n"
-: > "$log.$n.tmp"
-for a in "$@"; do printf '%%s\0' "$a" >> "$log.$n.tmp"; done
-mv "$log.$n.tmp" "$log.$n.argv"
-%s
-echo done > "$log.$n.end"
-]]
-
-local OUT = {
+local BODIES = {
   claude = [[
 sid=fake-session; prev=
 for a in "$@"; do
   if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid=$a; fi
   prev=$a
 done
-printf '%%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
-printf '%%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"$sid\"}"
+printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"$sid\"}"
+touch "$d/done"
 ]],
   codex = [[
-printf '%%s\n' '{"type":"thread.started","thread_id":"codex-thread-1"}'
-printf '%%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'
-printf '%%s\n' '{"type":"turn.completed","usage":{}}'
+printf '%s\n' '{"type":"thread.started","thread_id":"codex-thread-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{}}'
+touch "$d/done"
 ]],
   opencode = [[
-printf '%%s\n' '{"type":"text","sessionID":"ses_oc1","part":{"type":"text","text":"ok","sessionID":"ses_oc1"}}'
+printf '%s\n' '{"type":"text","sessionID":"ses_oc1","part":{"type":"text","text":"ok","sessionID":"ses_oc1"}}'
+touch "$d/done"
 ]],
   gemini = [[
-printf '%%s\n' '{"type":"init","session_id":"gem-1","model":"x"}'
-printf '%%s\n' '{"type":"message","role":"assistant","content":"ok"}'
-printf '%%s\n' '{"type":"result","status":"success"}'
+printf '%s\n' '{"type":"init","session_id":"gem-1","model":"x"}'
+printf '%s\n' '{"type":"message","role":"assistant","content":"ok"}'
+printf '%s\n' '{"type":"result","status":"success"}'
+touch "$d/done"
 ]],
 }
-
-local function install()
-  local dir = vim.fn.tempname()
-  local bin, log = dir .. "/bin", dir .. "/log"
-  vim.fn.mkdir(bin, "p")
-  vim.fn.mkdir(log, "p")
-  for name, out in pairs(OUT) do
-    write(bin .. "/" .. name, string.format(SCRIPT, log, name, string.format(out)))
-    uv.fs_chmod(bin .. "/" .. name, tonumber("755", 8))
-  end
-  local old = vim.env.PATH
-  vim.env.PATH = bin .. ":" .. old
-  return {
-    ---argv of call i of name (without the executable), once it has finished
-    call = function(name, i)
-      if not read(log .. "/" .. name .. "." .. i .. ".end") then
-        return nil
-      end
-      local argv = {}
-      for a in (read(log .. "/" .. name .. "." .. i .. ".argv") or ""):gmatch("([^%z]*)%z") do
-        argv[#argv + 1] = a
-      end
-      return argv
-    end,
-    restore = function()
-      vim.env.PATH = old
-    end,
-  }
-end
 
 ---argv without the `--session-id <id>` pair (claude may preset its session id).
 local function without_session_id(argv)
@@ -111,12 +61,18 @@ end
 describe("agent-poke.headless backends", function()
   local fake, headless, state, ap, old_state_home, old_notify
 
+  ---argv of call i of name (without the executable), once it has finished
+  local function call(name, i)
+    local c = fake.calls(name)[i]
+    return c and c.done and c.argv or nil
+  end
+
   before_each(function()
     old_state_home = vim.env.XDG_STATE_HOME
     vim.env.XDG_STATE_HOME = vim.fn.tempname()
     old_notify = vim.notify
     vim.notify = function() end
-    fake = install()
+    fake = helpers.install_fakes({ bodies = BODIES })
     ap = require("agent-poke")
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
@@ -136,14 +92,14 @@ describe("agent-poke.headless backends", function()
     headless.poke(root, "first prompt")
     local first
     assert.is_true(vim.wait(10000, function()
-      first = fake.call(name, 1)
+      first = call(name, 1)
       return first ~= nil and (state.get(root).session or {}).id ~= nil
     end, 20), name .. ": first run did not finish with a stored session")
     vim.wait(100)
     headless.poke(root, "second prompt")
     local second
     assert.is_true(vim.wait(10000, function()
-      second = fake.call(name, 2)
+      second = call(name, 2)
       return second ~= nil
     end, 20), name .. ": second run did not run")
     return first, second, root

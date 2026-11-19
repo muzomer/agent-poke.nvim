@@ -11,9 +11,7 @@ local VALID_STAGES = { sent = true, queued = true, working = true, done = true, 
 
 local BACKGROUND = "background" -- name of the background agent in a stored target
 
-local function notify(msg, level)
-  vim.notify("agent-poke: " .. msg, level or vim.log.levels.INFO)
-end
+local notify = require("agent-poke.util").notify
 
 ---Registered targets, in registration order.
 M.targets = {}

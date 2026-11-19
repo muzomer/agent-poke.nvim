@@ -41,18 +41,12 @@ local function arg_after(argv, flag)
   end
 end
 
--- A slow fake `claude` (test double): records argv, cwd and pids per call,
--- appends "start N" / "end N" to an events file, echoes the session id it was
--- given (--session-id / --resume, else "fake-session") in its stream-json and
--- sleeps <log>/delay seconds in between. It does not read stdin.
-local SLOW = [[#!/bin/sh
-log="%s"
-n=$(cat "$log/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log/n"
-d="$log/$n"; mkdir -p "$d"
-: > "$d/argv.tmp"
-for a in "$@"; do printf '%%s\0' "$a" >> "$d/argv.tmp"; done
-mv "$d/argv.tmp" "$d/argv"
-pwd -P > "$d/cwd"
+-- A slow fake `claude` body (test double, run after the install_fakes prelude
+-- that records argv and cwd per call): records its pids, appends "start N" /
+-- "end N" to an events file, echoes the session id it was given
+-- (--session-id / --resume, else "fake-session") in its stream-json and sleeps
+-- <log>/delay seconds in between. It does not read stdin.
+local SLOW_BODY = [[
 echo $$ > "$d/pid"
 echo "start $n" >> "$log/events"
 sid=fake-session; prev=
@@ -60,40 +54,30 @@ for a in "$@"; do
   if [ "$prev" = "--session-id" ] || [ "$prev" = "--resume" ]; then sid=$a; fi
   prev=$a
 done
-printf '%%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
 delay=$(cat "$log/delay" 2>/dev/null || echo 0)
 trap 'kill $! 2>/dev/null; exit 143' TERM
 sleep "$delay" &
 echo $! > "$d/sleep_pid"
 wait $!
 echo "end $n" >> "$log/events"
-printf '%%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"$sid\"}"
+printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"session_id\":\"$sid\"}"
 ]]
 
 local function install_slow()
-  local dir = vim.fn.tempname()
-  local bin, log = dir .. "/bin", dir .. "/log"
-  vim.fn.mkdir(bin, "p")
-  vim.fn.mkdir(log, "p")
-  write(bin .. "/claude", string.format(SLOW, log))
-  uv.fs_chmod(bin .. "/claude", tonumber("755", 8))
-  local old = vim.env.PATH
-  vim.env.PATH = bin .. ":" .. old
+  local fakes = helpers.install_fakes({ bodies = { claude = SLOW_BODY } })
+  local log = fakes.log
   local self = { log = log }
   function self.count()
-    return tonumber(vim.trim(read(log .. "/n") or "0")) or 0
+    return #fakes.calls("claude")
   end
   function self.call(i)
-    local d = log .. "/" .. i
-    local raw = read(d .. "/argv")
-    if not raw then
+    local c = fakes.calls("claude")[i]
+    if not c then
       return nil
     end
-    local argv = {}
-    for a in raw:gmatch("([^%z]*)%z") do
-      argv[#argv + 1] = a
-    end
-    return { argv = argv, cwd = vim.trim(read(d .. "/cwd") or ""), pid = tonumber(vim.trim(read(d .. "/pid") or "")) }
+    local pid = tonumber(vim.trim(read(log .. "/claude." .. i .. "/pid") or ""))
+    return { argv = c.argv, cwd = c.cwd, pid = pid }
   end
   function self.events()
     local out = {}
@@ -106,10 +90,10 @@ local function install_slow()
     write(log .. "/delay", tostring(secs))
   end
   function self.cleanup()
-    vim.env.PATH = old
+    fakes.restore()
     for i = 1, self.count() do
       for _, f in ipairs({ "pid", "sleep_pid" }) do
-        local pid = tonumber(vim.trim(read(log .. "/" .. i .. "/" .. f) or ""))
+        local pid = tonumber(vim.trim(read(log .. "/claude." .. i .. "/" .. f) or ""))
         if pid then
           pcall(uv.kill, pid, "sigkill")
         end
