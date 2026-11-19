@@ -13,8 +13,9 @@ local function dir()
 end
 
 ---Trim trailing slashes and resolve symlinks (when the path exists) so equivalent
----spellings of a root share one state file.
-local function normalize(root)
+---spellings of a root share one state file, one run and one queue (the one
+---normalization of the plugin; agent-poke.headless uses it too).
+function M.normalize(root)
   local r = root
   if #r > 1 then
     r = r:gsub("/+$", "")
@@ -26,7 +27,7 @@ local function normalize(root)
 end
 
 local function path_for(root)
-  root = normalize(root)
+  root = M.normalize(root)
   return dir() .. "/" .. vim.fn.sha256(root) .. ".json"
 end
 
@@ -76,7 +77,7 @@ end
 
 ---Legacy code-review.nvim session id: <root>/.code-review/headless.json.
 local function legacy_state(root)
-  root = normalize(root)
+  root = M.normalize(root)
   local d = decode_object(read_file(root .. "/.code-review/headless.json"))
   if d and type(d.session_id) == "string" and d.session_id ~= "" then
     local agent = type(d.agent) == "string" and d.agent ~= "" and d.agent or "claude"
@@ -85,8 +86,7 @@ local function legacy_state(root)
   return nil
 end
 
----Run fn while holding the root's lock (mkdir is atomic).
-local token_seq = 0
+local token_seq = 0 -- makes each lock owner token unique within this process
 
 ---Remove the lock dir only if it still holds our owner token. The dir is first
 ---renamed aside (atomic) so a concurrent new holder's lock is never half-deleted.
@@ -100,6 +100,7 @@ local function release(lock, token)
   end
 end
 
+---Run fn while holding the root's lock (mkdir is atomic).
 local function with_lock(path, fn)
   local lock = path .. ".lock"
   token_seq = token_seq + 1

@@ -221,12 +221,11 @@ end
 ---@return "started"|"queued"|"forked"|false
 ---@return string? run_id progress handle of the background run
 local function background(root, prompt, fork, opts, what, sent)
-  what = what or "the background agent"
-  if not headless.available() and not fork then
-    return fail(what, prompt, headless.command() .. " not found; set config.headless.cmd")
-  end
   local o = vim.tbl_extend("force", {}, opts or {})
   o.fork = fork
+  if fork then
+    o.keep_prompt = prompt -- unwrapped: kept in the " register if the queued fork cannot start
+  end
   local msgs, _, status, run_id = capture(function()
     return headless.poke(root, sent or prompt, o)
   end)

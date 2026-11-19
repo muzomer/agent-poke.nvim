@@ -3,7 +3,8 @@
 ---project root. The first poke starts a session and stores its id with
 ---agent-poke.state; later pokes resume it. Runs start in <root> (agents file
 ---their sessions by directory). A poke while a run is in flight is queued
----(one slot: the latest wins) and runs when the run ends.
+---(a FIFO queue of at most 10 per root) and runs when the run ends. Roots are
+---normalized (agent-poke.state): /a/b, /a/b/ and a symlink to it are one root.
 local state = require("agent-poke.state")
 local progress = require("agent-poke.progress")
 
@@ -13,8 +14,13 @@ local M = {}
 
 M.MAX_LINES = 500 -- output lines kept per run
 
-local runs = {} -- root -> { handle, lines, status = "working"|"done"|"failed"|"stopped", queued?, text }
+-- both keyed by the normalized root
+local runs = {} -- root -> { id, handle, lines, status = "working"|"done"|"failed"|"stopped", queue, text, fork?, error?, result? }
 local chats = {} -- root -> terminal job id of an open chat
+
+local function norm(root)
+  return state.normalize(root)
+end
 
 local function cfg()
   return require("agent-poke").config.headless or {}
@@ -246,6 +252,7 @@ end
 ---The stored session id, if it was started with the configured agent.
 ---@return string?
 function M.session_id(root)
+  root = norm(root)
   local s = state.get(root).session
   if type(s) == "table" and type(s.id) == "string" and (s.agent or "claude") == agent_name() then
     return s.id
@@ -259,6 +266,7 @@ end
 ---@return string cwd
 ---@return boolean legacy_unknown legacy session whose workdir cannot be known
 function M.session_cwd(root)
+  root = norm(root)
   local s = state.get(root).session
   if type(s) == "table" and type(s.cwd) == "string" and s.cwd ~= "" then
     return s.cwd, false
@@ -279,20 +287,20 @@ end
 ---State of the current (or last) run of root: nil before any run.
 ---@return { status: "working"|"done"|"failed"|"stopped", error?: string }?
 function M.status(root)
-  local run = runs[root]
+  local run = runs[norm(root)]
   return run and { status = run.status, error = run.error } or nil
 end
 
 ---Readable output lines of the current (or last) run of root.
 ---@return string[]
 function M.lines(root)
-  local run = runs[root]
+  local run = runs[norm(root)]
   return run and run.lines or {}
 end
 
 ---Is a run of root in flight?
 function M.running(root)
-  local run = runs[root]
+  local run = runs[norm(root)]
   return run ~= nil and run.status == "working"
 end
 
@@ -329,6 +337,7 @@ end
 ---Command line of a run. `resume` = id of the session to continue, `new_id` = id for a new one,
 ---`fork` = id of a session to copy (run by `agent`, in `cwd`).
 function M.args(root, text, opts)
+  root = norm(root)
   -- one adapter builds the line: a foreign agent (a fork) gets its own adapter,
   -- executable and no settings of the configured agent
   local foreign = opts.agent and opts.agent ~= agent_name()
@@ -405,6 +414,18 @@ local function start_next(root, queue)
   end
 end
 
+---Report a prompt that could not start once, on one line, and keep it in the " register.
+---A fork's text is a wrapper of the caller's prompt: its caller keeps the prompt itself.
+local function start_failed(text, what, msg, fork, o)
+  local keep = text
+  if fork then
+    keep = type(o) == "table" and o.keep_prompt or nil -- the caller's unwrapped prompt, if it gave one
+  end
+  local kept = keep ~= nil and pcall(vim.fn.setreg, '"', keep)
+  notify(string.format("could not start %s: %s%s", what, msg, kept and ' (prompt copied to the " register)' or ""),
+    vim.log.levels.ERROR)
+end
+
 local function start_unsafe(root, text, retried, fork, o, queue, id)
   o = o or {}
   local a = M.adapter(fork and fork.agent) or M.adapter()
@@ -418,7 +439,7 @@ local function start_unsafe(root, text, retried, fork, o, queue, id)
   if new_id then
     local ok, err = pcall(save_session_id, root, new_id, run_cwd) -- before the run, so a second poke resumes it
     if not ok then
-      notify(string.format("could not start %s: %s", a.name, one_line(tostring(err), 200)), vim.log.levels.ERROR)
+      start_failed(text, a.name, one_line(tostring(err), 200), fork)
       progress.set(id, "failed", one_line(tostring(err), 200))
       return nil
     end
@@ -538,7 +559,7 @@ local function start_unsafe(root, text, retried, fork, o, queue, id)
     end
     run.status, run.error = "failed", one_line(tostring(handle), 200)
     progress.set(id, "failed", run.error)
-    notify(string.format("could not start %s: %s", a.name, run.error), vim.log.levels.ERROR)
+    start_failed(text, a.name, run.error, fork, o)
     return nil
   end
   run.handle = handle
@@ -563,7 +584,7 @@ start = function(root, text, retried, fork, o, queue, id)
     run.status, run.error = "failed", msg
   end
   progress.set(id, "failed", msg)
-  notify("could not start the agent: " .. msg, vim.log.levels.ERROR)
+  start_failed(text, "the agent", msg, fork, o)
   return nil
 end
 
@@ -571,15 +592,16 @@ end
 ---@return boolean started false when the poke was queued or could not start
 ---@return "started"|"queued"|false status
 ---@return string id handle of this poke (see agent-poke.progress)
----@param opts? { fork?: { id: string, cwd: string, agent?: string }, cwd?: string,  tools?: string[], dirs?: string[], env?: table<string,string>, on_start?: fun() }
-function M.poke(root, text, opts)
+---@param opts? { keep_prompt?: string, fork?: { id: string, cwd: string, agent?: string }, cwd?: string,  tools?: string[], dirs?: string[], env?: table<string,string>, on_start?: fun() }
+function M.poke(caller_root, text, opts)
+  local root = norm(caller_root) -- internal lookup key; events and returned handles carry caller_root
   opts = opts or {}
   local fork = opts.fork
   if chats[root] then
     -- the chat has this session open interactively: do not resume it too
     pcall(vim.fn.setreg, '"', text)
     notify('a chat has this session open; prompt copied to the " register')
-    return false, false, progress.new(root, "background", "failed", "a chat has this session open", true)
+    return false, false, progress.new(caller_root, "background", "failed", "a chat has this session open", true)
   end
   local run = runs[root]
   if run and run.status == "working" then
@@ -590,11 +612,11 @@ function M.poke(root, text, opts)
     elseif #run.queue == 0 then
       notify("the agent is still working; your prompt runs when it is done")
     end
-    local id = progress.new(root, "background", "queued", nil, true)
+    local id = progress.new(caller_root, "background", "queued", nil, true)
     run.queue[#run.queue + 1] = { text = text, fork = fork, opts = opts, id = id }
     return false, "queued", id
   end
-  local id = progress.new(root, "background", "working", nil, true)
+  local id = progress.new(caller_root, "background", "working", nil, true)
   local started = start(root, text, nil, fork, opts, nil, id) ~= nil
   return started, started and "started" or false, id
 end
@@ -602,6 +624,7 @@ end
 ---Open root's conversation interactively in a terminal split, with the
 ---configured agent's own resume command on the stored session.
 function M.chat(root)
+  root = norm(root)
   local id = M.session_id(root)
   if not id then
     return notify("no background agent session yet; poke first", vim.log.levels.WARN)
@@ -645,10 +668,11 @@ function M.chat(root)
   vim.cmd.startinsert()
 end
 
----Stop the running process of this root (the session is kept). A queued prompt
----is dropped and reported as cancelled.
+---Stop the running process of this root (the session is kept). Every queued
+---prompt is dropped and reported as cancelled.
 ---@return boolean stopped
 function M.stop(root)
+  root = norm(root)
   local run = runs[root]
   if run and run.status == "working" then
     -- keep the stopped run's text for the output window; the stub also makes

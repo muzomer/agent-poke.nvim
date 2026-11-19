@@ -1,6 +1,6 @@
 -- Test doubles and harness for the herdr target specs (not a spec itself).
 --
--- Fakes: `herdr` answers `agent list` from <log>/agents.json (or fails with
+-- Fakes (built on tests/helpers.install_fakes): `herdr` answers `agent list` from <log>/agents.json (or fails with
 -- exit 1 while <log>/list_fail exists) and `agent prompt` from
 -- <log>/prompt.json (default {"result":{"ok":true}}); it records argv and cwd
 -- per call, and can sleep `delay` seconds first (on SIGTERM it kills the sleep
@@ -13,21 +13,13 @@
 --   h.ap, h.state, h.fakes, h.notes ({msg, level}), h.selects (one entry per
 --   vim.ui.select: { labels, mode, at }), h.choose (substring of the label to
 --   choose; nil dismisses), h.on_select (called before the choice).
+local helpers = require("tests.helpers")
+
 local uv = vim.uv or vim.loop
 
 local M = {}
 
 M.OWN = "w1:p5" -- the pane this Neovim runs in
-
-local function read(path)
-  local f = io.open(path, "rb")
-  if not f then
-    return nil
-  end
-  local s = f:read("a")
-  f:close()
-  return s
-end
 
 local function write(path, text)
   vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
@@ -42,19 +34,6 @@ function M.new_dir()
   vim.fn.mkdir(d, "p")
   return uv.fs_realpath(d)
 end
-
-local RECORD = [[#!/bin/sh
-log="%s"
-name="%s"
-delay="%s"
-n=$(cat "$log/$name.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$log/$name.n"
-d="$log/$name.$n"; mkdir -p "$d"
-: > "$d/argv.tmp"
-for a in "$@"; do printf '%%s\0' "$a" >> "$d/argv.tmp"; done
-mv "$d/argv.tmp" "$d/argv"
-pwd -P > "$d/cwd"
-%s
-]]
 
 local HERDR_BODY = [[
 pid=
@@ -93,45 +72,17 @@ printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\",\"
 touch "$d/done"
 ]]
 
+---Install the fakes with helpers.install_fakes (PATH starts with their bin).
 ---@param opts? { delay?: string } seconds the fake herdr sleeps before answering
 function M.install(opts)
   opts = opts or {}
-  local dir = vim.fn.tempname()
-  local bin, log = dir .. "/bin", dir .. "/log"
-  vim.fn.mkdir(bin, "p")
-  vim.fn.mkdir(log, "p")
-  for name, body in pairs({ herdr = HERDR_BODY, claude = CLAUDE_BODY }) do
-    write(bin .. "/" .. name, string.format(RECORD, log, name, name == "herdr" and (opts.delay or "0") or "0", body))
-    uv.fs_chmod(bin .. "/" .. name, tonumber("755", 8))
-  end
-  local self = { bin = bin, log = log }
-  function self.calls(name)
-    local list = {}
-    local n = tonumber(vim.trim(read(log .. "/" .. name .. ".n") or "0")) or 0
-    for i = 1, n do
-      local d = log .. "/" .. name .. "." .. i
-      local raw = read(d .. "/argv")
-      if raw then
-        local argv = {}
-        for a in raw:gmatch("([^%z]*)%z") do
-          argv[#argv + 1] = a
-        end
-        list[#list + 1] = { argv = argv, cwd = vim.trim(read(d .. "/cwd") or ""), done = uv.fs_stat(d .. "/done") ~= nil }
-      else
-        list[#list + 1] = { argv = {}, cwd = "", done = uv.fs_stat(d .. "/done") ~= nil }
-      end
-    end
-    return list
-  end
+  local self = helpers.install_fakes({
+    bodies = { herdr = string.format('delay="%s"\n', opts.delay or "0") .. HERDR_BODY, claude = CLAUDE_BODY },
+    stdin = false,
+  })
+  local log, bin = self.log, self.bin
   function self.pending()
-    for _, name in ipairs({ "herdr", "claude" }) do
-      for _, c in ipairs(self.calls(name)) do
-        if not c.done then
-          return true
-        end
-      end
-    end
-    return false
+    return not self.all_done()
   end
   function self.prompts()
     return vim.tbl_filter(function(c)

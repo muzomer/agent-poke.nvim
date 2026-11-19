@@ -92,8 +92,8 @@ function M.setup(opts)
   opts = vim.deepcopy(opts or {})
   local agent = type(opts.headless) == "table" and opts.headless.agent
   if agent ~= nil and agent ~= false and not KNOWN_AGENTS[agent] then
-    vim.notify(
-      string.format('agent-poke: unknown headless.agent "%s" (use claude, codex, opencode or gemini); keeping "%s"',
+    notify(
+      string.format('unknown headless.agent "%s" (use claude, codex, opencode or gemini); keeping "%s"',
         tostring(agent), tostring(M.config.headless.agent)),
       vim.log.levels.ERROR
     )
@@ -344,7 +344,7 @@ end
 ---Stop root's background run.
 function M.stop(root)
   if not require("agent-poke.headless").stop(root) then
-    vim.notify("agent-poke: no background run to stop", vim.log.levels.INFO)
+    notify("no background run to stop")
   end
 end
 
