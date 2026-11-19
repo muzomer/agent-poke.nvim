@@ -64,18 +64,23 @@ local function add_target(t, topts)
   end
 end
 
----Targets a legacy `agent` option stands for: the built-in adapters that list
----that value in `legacy_agents`; none for "headless" or anything else.
+---Targets a deprecated `agent` value stands for: the built-in adapters whose
+---source lists it in `legacy_agents`. Their files are read, not loaded, so
+---enabling no target loads no adapter.
 local function legacy_targets(agent)
   if type(agent) ~= "string" then
     return nil
   end
   local names = {}
   for _, f in ipairs(vim.api.nvim_get_runtime_file("lua/agent-poke/targets/*.lua", true)) do
-    local name = vim.fn.fnamemodify(f, ":t:r")
-    local ok, mod = pcall(require, "agent-poke.targets." .. name)
-    if ok and type(mod) == "table" and vim.tbl_contains(mod.legacy_agents or {}, agent) then
-      names[#names + 1] = name
+    local fh = io.open(f, "r")
+    local text = fh and fh:read("a") or ""
+    if fh then
+      fh:close()
+    end
+    local list = text:match("legacy_agents%s*=%s*(%b{})")
+    if list and list:find('"' .. agent .. '"', 1, true) then
+      names[#names + 1] = vim.fn.fnamemodify(f, ":t:r")
     end
   end
   return names
@@ -148,8 +153,11 @@ local function deliver(t, root, entry, prompt, opts, ctx)
 end
 
 local function entries_of(t, root, ctx)
-  if type(t.list) ~= "function" or not is_available(t) then
+  if type(t.list) ~= "function" then
     return {}
+  end
+  if not is_available(t) then
+    return {}, false, true
   end
   local ok, list, err = pcall(t.list, root, ctx or {})
   if not ok or type(list) ~= "table" then
@@ -166,19 +174,30 @@ local function remember(root, value)
   end
 end
 
+---Picker rows: title, status and cwd in aligned columns (as the targets' labels).
+local function format_row(title, status, cwd)
+  return string.format("%-40s %-8s %s", title, status or "", cwd or "")
+end
+
 local function pick_generic(root, on_pick)
   local headless = require("agent-poke.headless")
   local items = {}
   local list_failed = false
+  local skipped = false -- a target is not reachable now: its entries are missing, not absent
   for _, t in ipairs(M.targets) do
-    local list, failed = entries_of(t, root)
+    local list, failed, unavailable = entries_of(t, root)
     list_failed = list_failed or failed or false
+    skipped = skipped or unavailable or false
     for _, e in ipairs(list) do
       items[#items + 1] = { target = t, entry = e, title = tostring(e.label or e.title or e.id) }
     end
   end
   if headless.available() then
-    items[#items + 1] = { title = vim.fs.basename(headless.command()) .. " (background)" }
+    local run = headless.status(root)
+    items[#items + 1] = {
+      title = format_row(vim.fs.basename(headless.command()) .. " (background)", run and run.status or "idle",
+        (root:gsub("^" .. vim.pesc(vim.env.HOME or "\0"), "~"))),
+    }
   end
   if #items == 0 then
     return notify("no agent to poke: " .. headless.command() .. " not found; set config.headless.cmd", vim.log.levels.WARN)
@@ -187,6 +206,9 @@ local function pick_generic(root, on_pick)
     if not item then
       return
     end
+    if skipped and not item.target and not on_pick then
+      return -- nothing to remember: the other targets may be back
+    end
     local value = item.target and { target = item.target.name, id = item.entry.id } or { target = BACKGROUND }
     if not on_pick then
       return remember(root, value)
@@ -194,7 +216,7 @@ local function pick_generic(root, on_pick)
     local ok, res = pcall(on_pick, item)
     if not ok then
       notify("poke failed: " .. tostring(res), vim.log.levels.ERROR)
-    elseif res then -- stored only once the prompt was delivered
+    elseif res and not (skipped and not item.target) then -- stored only once the prompt was delivered
       remember(root, value)
     end
   end
@@ -229,7 +251,8 @@ function M.poke(root, prompt, opts)
   if #M.targets == 0 then
     return background(root, prompt, opts)
   end
-  if opts.pick then
+  local saved = require("agent-poke.state").get(root).target
+  if opts.pick or type(saved) ~= "table" then -- no stored choice: ask
     local result = false
     pick_generic(root, function(item)
       if item.target then
@@ -241,8 +264,10 @@ function M.poke(root, prompt, opts)
     end)
     return result
   end
-  local saved = require("agent-poke.state").get(root).target
-  local target = type(saved) == "table" and saved.target and find_target(saved.target)
+  local target = saved.target and find_target(saved.target)
+  if target and not is_available(target) then
+    return background(root, prompt, opts) -- e.g. its program is down: the choice is kept for later
+  end
   if target then
     local ctx = {} -- list and deliver share one deadline
     local list, failed = entries_of(target, root, ctx)

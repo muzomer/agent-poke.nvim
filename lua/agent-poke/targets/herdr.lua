@@ -1,8 +1,9 @@
 ---Poke an agent running in herdr (https://herdr.dev), which can submit a prompt
 ---to any agent pane from outside (`herdr agent prompt <pane> <text>`). The agent
----is chosen once per root in a picker and remembered with agent-poke.state; the
----background agent (agent-poke.headless) is offered in the picker and is the
----fallback when herdr or the chosen pane is gone.
+---is chosen once per root in core's picker (agent-poke) and remembered with
+---agent-poke.state. This is a target: core offers its panes next to the
+---background agent and falls back to the background agent when herdr is down
+---or the chosen pane is gone. Forked deliveries run through agent-poke.headless.
 local headless = require("agent-poke.headless")
 
 local M = {}

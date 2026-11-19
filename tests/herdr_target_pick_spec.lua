@@ -4,8 +4,9 @@
 -- old herdr.pick / herdr.poke directly (agent-poke_nvim-0d8.2 finding 1).
 --
 -- Core stores a herdr choice as state key target = { target = "herdr", id = <pane> }.
--- The old herdr.poke() opened the picker when nothing was stored; core sends
--- that to the background agent, so the pick-path checks use poke({ pick = true }).
+-- Like the old herdr.poke(), core's poke() opens the picker when nothing is
+-- stored (agent-poke_nvim-hla); these checks use poke({ pick = true }) to open it
+-- also when a choice is stored.
 local F = require("tests.herdr_fakes")
 
 describe("herdr target: picking", function()

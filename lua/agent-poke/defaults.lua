@@ -2,8 +2,6 @@
 return function()
   return {
     targets = {}, -- extra places to poke besides the background agent: names of built-in targets or specs
-    agent = "auto", -- legacy ("auto", "headless", ...); superseded by targets
-    isolate = "fork", -- keep the work out of a target agent's session: "fork", "subagent", or false (typed in as is)
     headless = { -- the background agent: one resumable conversation
       agent = "claude", -- "claude", "codex", "opencode" or "gemini"
       cmd = nil, -- its executable (default: the agent's own)

@@ -20,16 +20,16 @@ describe("agent-poke setup()", function()
     local ap = fresh()
     ap.setup()
     local c = ap.config
-    assert.are.same("auto", c.agent) -- herdr choice: "auto", "herdr", "headless"
-    assert.are.same("fork", c.isolate)
+    assert.is_nil(c.agent) -- superseded by targets
+    assert.is_nil(c.isolate) -- an adapter option
     assert.are.same(HEADLESS_DEFAULTS, c.headless)
   end)
 
   it("with an empty table gives the same defaults", function()
     local ap = fresh()
     ap.setup({})
-    assert.are.same("auto", ap.config.agent)
-    assert.are.same("fork", ap.config.isolate)
+    assert.is_nil(ap.config.agent)
+    assert.is_nil(ap.config.isolate)
     assert.are.same(HEADLESS_DEFAULTS, ap.config.headless)
   end)
 
@@ -39,8 +39,8 @@ describe("agent-poke setup()", function()
     local want = vim.deepcopy(HEADLESS_DEFAULTS)
     want.agent = "codex"
     assert.are.same(want, ap.config.headless)
-    assert.are.same("fork", ap.config.isolate)
-    assert.are.same("auto", ap.config.agent)
+    assert.is_nil(ap.config.isolate)
+    assert.is_nil(ap.config.agent)
   end)
 
   it("accepts isolate = false", function()
