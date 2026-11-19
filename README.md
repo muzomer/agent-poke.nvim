@@ -35,6 +35,7 @@ These are the defaults; pass only what you want to change.
 ```lua
 require("agent-poke").setup({
   agent = "auto",     -- who gets poked: "auto", "herdr" or "headless"
+  targets = {},       -- extra targets besides the background agent (names of built-in targets or specs)
   isolate = "fork",   -- "fork", "subagent" or false
   headless = {        -- the background agent
     agent = "claude", -- "claude", "codex", "opencode" or "gemini"
@@ -67,6 +68,7 @@ All functions take the project `root` (a directory path).
 local ap = require("agent-poke")
 
 ap.setup({ agent = "headless" })          -- configure; returns the config
+ap.register_target({ name = "x", deliver = function(root, entry, prompt, opts) return "typed" end }) -- add a target
 ap.poke(vim.fn.getcwd(), "run the tests") -- send a prompt
 ap.pick(vim.fn.getcwd(), function() end)  -- choose the agent (herdr panes or the background agent); callback is optional
 ap.status(vim.fn.getcwd())                -- state of the background run: nil, or { status = "working"|"done"|"failed"|"stopped", error? }

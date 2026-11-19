@@ -1,5 +1,5 @@
 -- agent-poke_nvim-ei4.3 findings: re-pick with the default isolate = "fork"
--- (lua/agent-poke/herdr.lua deliver()).
+-- (lua/agent-poke/targets/herdr.lua deliver()).
 --   * The newly picked Claude pane's session is found, but the fork cannot
 --     start (its session directory is gone): the user must get one one-line
 --     notification after the picker closes (no false "poked ... (fork)"), the
@@ -153,7 +153,7 @@ describe("agent-poke.herdr re-pick with isolate = fork (default)", function()
     require("agent-poke").config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
-    herdr = require("agent-poke.herdr")
+    herdr = require("agent-poke.targets.herdr")
   end)
 
   after_each(function()

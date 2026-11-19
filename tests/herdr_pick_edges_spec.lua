@@ -1,4 +1,4 @@
--- agent-poke_nvim-ei4.3: picker edge cases (lua/agent-poke/herdr.lua).
+-- agent-poke_nvim-ei4.3: picker edge cases (lua/agent-poke/targets/herdr.lua).
 --   * "(background)" is offered only when the background agent is available
 --     (headless.available()).
 --   * The picked target is stored (state key `target`) only after the prompt
@@ -150,7 +150,7 @@ describe("agent-poke.herdr picker edge cases", function()
     require("agent-poke").config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
-    herdr = require("agent-poke.herdr")
+    herdr = require("agent-poke.targets.herdr")
   end)
 
   after_each(function()

@@ -1,6 +1,6 @@
 -- agent-poke_nvim-wtd.4: herdr targets (pick, fork vs type, per-root memory).
 --
--- Interface (lua/agent-poke/herdr.lua), ported from code-review.nvim's poke.lua:
+-- Interface (lua/agent-poke/targets/herdr.lua), ported from code-review.nvim's poke.lua:
 --   herdr.pick(root)          -- vim.ui.select over the herdr agent panes (this
 --                                pane left out) plus "… (background)"; the choice
 --                                is stored per root with agent-poke.state (key `target`)
@@ -137,7 +137,7 @@ local function has(argv, flag)
   return vim.tbl_contains(argv, flag)
 end
 
-describe("agent-poke.herdr", function()
+describe("agent-poke.targets.herdr", function()
   local herdr, state, headless, fakes, notes, selects, choose
   local saved_env, old_notify, old_select
 
@@ -182,7 +182,7 @@ describe("agent-poke.herdr", function()
     require("agent-poke").config = require("agent-poke.defaults")()
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
-    herdr = require("agent-poke.herdr")
+    herdr = require("agent-poke.targets.herdr")
   end)
 
   after_each(function()
@@ -244,7 +244,7 @@ describe("agent-poke.herdr", function()
 
   describe("pick", function()
     it("stores the choice per root; a second root keeps its own", function()
-      require("agent-poke").setup({ isolate = false })
+      require("agent-poke").setup({ targets = { "herdr" }, isolate = false })
       local a_dir, b_dir = new_dir(), new_dir()
       fakes.agents({
         pane("w1:p1", "Review PR", a_dir),
@@ -305,7 +305,7 @@ describe("agent-poke.herdr", function()
 
   describe("fork", function()
     it("isolate='fork' with a Claude transcript runs a throwaway fork in the session's directory", function()
-      require("agent-poke").setup({ isolate = "fork" })
+      require("agent-poke").setup({ targets = { "herdr" }, isolate = "fork" })
       local sess_dir, pane_dir, root = new_dir(), new_dir(), new_dir()
       transcript("sess-123", sess_dir)
       fakes.agents({ pane("w1:p1", "Review PR", pane_dir, "sess-123") })
@@ -332,7 +332,7 @@ describe("agent-poke.herdr", function()
 
   describe("typing into the pane", function()
     it("without a transcript (isolate='fork') types the prompt with the subagent wording", function()
-      require("agent-poke").setup({ isolate = "fork" })
+      require("agent-poke").setup({ targets = { "herdr" }, isolate = "fork" })
       local root = new_dir()
       fakes.agents({ pane("w1:p1", "Review PR", new_dir(), "no-transcript") })
       choose = "Review PR"
@@ -352,7 +352,7 @@ describe("agent-poke.herdr", function()
     end)
 
     it("isolate='subagent' types the prompt with the subagent wording even with a transcript", function()
-      require("agent-poke").setup({ isolate = "subagent" })
+      require("agent-poke").setup({ targets = { "herdr" }, isolate = "subagent" })
       local sess_dir, root = new_dir(), new_dir()
       transcript("sess-456", sess_dir)
       fakes.agents({ pane("w1:p1", "Review PR", sess_dir, "sess-456") })
@@ -372,7 +372,7 @@ describe("agent-poke.herdr", function()
     end)
 
     it("isolate=false types the plain prompt, even with a transcript", function()
-      require("agent-poke").setup({ isolate = false })
+      require("agent-poke").setup({ targets = { "herdr" }, isolate = false })
       local sess_dir, root = new_dir(), new_dir()
       transcript("sess-789", sess_dir)
       fakes.agents({ pane("w1:p1", "Review PR", sess_dir, "sess-789") })

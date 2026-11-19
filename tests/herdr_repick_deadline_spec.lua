@@ -122,10 +122,10 @@ describe("agent-poke.herdr re-pick when the remembered pane is gone (agent = her
       cb(nil) -- cancel: no further herdr call is started
     end
 
-    require("agent-poke").setup({ isolate = false, agent = "herdr" })
+    require("agent-poke").setup({ targets = { "herdr" }, isolate = false, agent = "herdr" })
     state = require("agent-poke.state")
     headless = require("agent-poke.headless")
-    herdr = require("agent-poke.herdr")
+    herdr = require("agent-poke.targets.herdr")
     old_timeout = herdr.TIMEOUT_MS
     herdr.TIMEOUT_MS = TIMEOUT
 

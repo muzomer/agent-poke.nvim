@@ -273,7 +273,7 @@ describe("agent-poke public API", function()
   end
 
   describe("exports", function()
-    it("are exactly setup, poke, pick, output, chat, stop, status, lines", function()
+    it("are exactly setup, register_target, poke, pick, output, chat, stop, status, lines", function()
       local fns = {}
       for k, v in pairs(require("agent-poke")) do
         if type(v) == "function" then
@@ -281,13 +281,13 @@ describe("agent-poke public API", function()
         end
       end
       table.sort(fns)
-      assert.are.same({ "chat", "lines", "output", "pick", "poke", "setup", "status", "stop" }, fns)
+      assert.are.same({ "chat", "lines", "output", "pick", "poke", "register_target", "setup", "status", "stop" }, fns)
     end)
   end)
 
   describe("poke", function()
     it("goes to the herdr pane that was picked", function()
-      ap.setup({ isolate = false }) -- typed into the pane, not forked
+      ap.setup({ targets = { "herdr" }, isolate = false }) -- typed into the pane, not forked
       local d, root = new_dir(), new_dir()
       fakes.agents({ pane("w1:p1", "Review PR", d), pane(OWN, "This nvim", d) })
       choose = "Review PR"

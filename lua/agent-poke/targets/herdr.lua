@@ -8,6 +8,9 @@ local headless = require("agent-poke.headless")
 
 local M = {}
 
+M.name = "herdr"
+M.legacy_auto = true -- config.agent = "auto" enables this target
+
 M.TIMEOUT_MS = 8000
 
 M.HEADLESS = "headless" -- pane_id of the background agent in a stored target
