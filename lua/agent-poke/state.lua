@@ -148,6 +148,15 @@ local function with_lock(path, fn)
   end
 end
 
+---mkdir -p that tolerates a concurrent creator (E739 when the path already is a directory).
+local function ensure_dir()
+  local d = dir()
+  local ok, err = pcall(vim.fn.mkdir, d, "p")
+  if not ok and vim.fn.isdirectory(d) ~= 1 then
+    error(err, 0)
+  end
+end
+
 ---Everything stored for root; {} when nothing. Imports the legacy session on first read.
 ---@param root string
 ---@return table
@@ -161,7 +170,7 @@ function M.get(root)
   if not legacy then
     return {}
   end
-  vim.fn.mkdir(dir(), "p")
+  ensure_dir()
   local result = legacy
   with_lock(path, function()
     local again = read_file(path)
@@ -180,7 +189,7 @@ end
 ---@param value any
 function M.set(root, key, value)
   local path = path_for(root)
-  vim.fn.mkdir(dir(), "p")
+  ensure_dir()
   with_lock(path, function()
     local text = read_file(path)
     local data
