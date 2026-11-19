@@ -8,7 +8,7 @@ local headless = require("agent-poke.headless")
 local M = {}
 
 M.name = "herdr"
-M.legacy_auto = true -- config.agent = "auto" enables this target
+M.legacy_agents = { "herdr", "auto" } -- the deprecated config.agent values that enable this target
 
 M.TIMEOUT_MS = 8000
 

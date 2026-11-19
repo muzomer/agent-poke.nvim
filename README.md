@@ -1,10 +1,10 @@
 # agent-poke.nvim
 
-Send a prompt from Neovim to a coding agent. If you run an agent in
-[herdr](https://herdr.dev), you pick it once per project root and the prompt is
-delivered to it. Otherwise (or when herdr is gone) a background agent
+Send a prompt from Neovim to a coding agent. By default a background agent
 (`claude -p`, codex, opencode or gemini) runs the prompt headlessly in one
-resumable conversation per project root.
+resumable conversation per project root. [herdr](https://herdr.dev) is an
+opt-in target: enable it with `targets = { "herdr" }` to poke an agent running
+in herdr instead.
 
 Requires Neovim 0.10+. No autocmds or mappings are created until you call `require("agent-poke").setup()`.
 
@@ -34,8 +34,7 @@ These are the defaults; pass only what you want to change.
 
 ```lua
 require("agent-poke").setup({
-  agent = "auto",     -- who gets poked: "auto", "herdr" or "headless"
-  targets = {},       -- extra targets besides the background agent (names of built-in targets or specs)
+  targets = {},       -- extra targets besides the background agent (e.g. { "herdr" })
   isolate = "fork",   -- "fork", "subagent" or false
   headless = {        -- the background agent
     agent = "claude", -- "claude", "codex", "opencode" or "gemini"
@@ -50,15 +49,60 @@ require("agent-poke").setup({
 })
 ```
 
-- `agent`: `"auto"` pokes a herdr agent you pick, else the background agent;
-  `"herdr"` only herdr (errors when it is not running); `"headless"` always the
-  background agent.
+- `targets`: see [Targets](#targets). The old `agent` option is deprecated, see [Migration](#migration).
 - `isolate`: how to keep the work out of a herdr agent's own session.
   `"fork"` runs a throwaway fork of its session as a background run (needs an
   agent that can fork: claude or opencode); if that is not possible the prompt
   is typed into the pane (with a subagent note when the agent supports subagents). `"subagent"` types the prompt into the pane with a
   note asking the agent to use a subagent (agents that support it). `false`
   types the prompt in as is.
+
+## Background agent
+
+The default. agent-poke works without any multiplexer: with no targets
+enabled, `poke()` runs the prompt in a background agent (`headless.agent`,
+see [Backends](#backends)), one resumable conversation per project root.
+
+## Targets
+
+A target is an extra place to poke besides the background agent. Enable
+built-in ones in `setup`:
+
+```lua
+require("agent-poke").setup({ targets = { "herdr" } })
+-- with options:
+require("agent-poke").setup({ targets = { herdr = { isolate = "fork" } } })
+```
+
+The herdr adapter pokes an agent running in [herdr](https://herdr.dev); the
+background agent stays offered in the picker and is the fallback when herdr
+is gone. herdr is used only when this target is enabled.
+
+Adapter authors register a target (a table) with `register_target`. Call it
+after `setup()`, because `setup()` resets the target list. `configure(opts)` is
+only called for built-in targets under `lua/agent-poke/targets/`, not for
+tables passed to `register_target`:
+
+```lua
+require("agent-poke").register_target({
+  name = "x",                                   -- unique name
+  available = function() return true end,       -- optional: is the target usable now?
+  list = function(root, ctx) return { { id = "1", title = "my agent" } } end, -- optional: entries to pick from
+  deliver = function(root, entry, prompt, opts, ctx) return "typed" end,    -- required: returns a status, or false, err
+  configure = function(opts) end,               -- optional: built-in targets only, receives its options from setup
+})
+```
+
+## Migration
+
+The old `agent` option still works for now but is deprecated: `setup()` shows
+a one-line notice when you pass it.
+
+| old                   | new                      |
+|-----------------------|--------------------------|
+| `agent = "herdr"`     | `targets = { "herdr" }`  |
+| `agent = "auto"`      | `targets = { "herdr" }`  |
+| `agent = "headless"`  | the default, `setup({})` |
 
 ## API
 
@@ -67,10 +111,10 @@ All functions take the project `root` (a directory path).
 ```lua
 local ap = require("agent-poke")
 
-ap.setup({ agent = "headless" })          -- configure; returns the config
+ap.setup({})                              -- configure; returns the config
 ap.register_target({ name = "x", deliver = function(root, entry, prompt, opts) return "typed" end }) -- add a target
 ap.poke(vim.fn.getcwd(), "run the tests") -- send a prompt
-ap.pick(vim.fn.getcwd(), function() end)  -- choose the agent (herdr panes or the background agent); callback is optional
+ap.pick(vim.fn.getcwd(), function() end)  -- choose the agent (herdr panes only when the herdr target is enabled, or the background agent); callback is optional
 ap.status(vim.fn.getcwd())                -- state of the background run: nil, or { status = "working"|"done"|"failed"|"stopped", error? }
 ap.lines(vim.fn.getcwd())                 -- readable output lines of the current/last background run
 ap.output(vim.fn.getcwd())                -- toggle a window following the current/last background run
@@ -78,8 +122,8 @@ ap.chat(vim.fn.getcwd())                  -- open the background session interac
 ap.stop(vim.fn.getcwd())                  -- stop the background run
 ```
 
-- `poke(root, prompt, opts)`: delivers to the picked herdr pane, else the background
-  agent. A poke while a run is in flight is queued and runs when it finishes.
+- `poke(root, prompt, opts)`: delivers to the picked herdr pane (only when the herdr target is
+  enabled), else the background agent. A poke while a run is in flight is queued and runs when it finishes.
   It returns, synchronously, `"started"` (a background run began), `"queued"`
   (a run is in flight), `"typed"` (typed into the herdr pane), `"forked"` (a
   throwaway fork of the herdr agent's session runs) or `false` (it failed, or a
@@ -92,8 +136,8 @@ ap.stop(vim.fn.getcwd())                  -- stop the background run
   - `pick`: `true` opens the picker even when an agent is remembered.
 - `status(root)`: `nil` before any background run, else (after `stop()`, `"stopped"` and `lines()` ends with `(stopped)`) `{ status = "working" | "done" | "failed" | "stopped", error? }`.
 - `lines(root)`: the readable output lines of the current/last background run.
-- `pick(root, on_pick)`: lets you choose between the agents running in herdr
-  and the background agent; the choice is remembered for the root.
+- `pick(root, on_pick)`: lets you choose between the agents running in herdr (when the herdr
+  target is enabled) and the background agent; the choice is remembered for the root.
 - `output(root)`: a second call closes the window. It refreshes while the run
   is in flight.
 - `chat(root)`: resumes the stored session with the agent's own CLI; needs a

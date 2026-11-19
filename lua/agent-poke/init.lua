@@ -64,24 +64,21 @@ local function add_target(t, topts)
   end
 end
 
----Targets a legacy `agent` option stands for: "auto" the built-in adapters that
----flag `legacy_auto`, "headless" none, any other name the built-in of that name.
+---Targets a legacy `agent` option stands for: the built-in adapters that list
+---that value in `legacy_agents`; none for "headless" or anything else.
 local function legacy_targets(agent)
-  if agent == "auto" then
-    local names = {}
-    for _, f in ipairs(vim.api.nvim_get_runtime_file("lua/agent-poke/targets/*.lua", true)) do
-      local name = vim.fn.fnamemodify(f, ":t:r")
-      local ok, mod = pcall(require, "agent-poke.targets." .. name)
-      if ok and type(mod) == "table" and mod.legacy_auto then
-        names[#names + 1] = name
-      end
+  if type(agent) ~= "string" then
+    return nil
+  end
+  local names = {}
+  for _, f in ipairs(vim.api.nvim_get_runtime_file("lua/agent-poke/targets/*.lua", true)) do
+    local name = vim.fn.fnamemodify(f, ":t:r")
+    local ok, mod = pcall(require, "agent-poke.targets." .. name)
+    if ok and type(mod) == "table" and vim.tbl_contains(mod.legacy_agents or {}, agent) then
+      names[#names + 1] = name
     end
-    return names
   end
-  if type(agent) == "string" and agent ~= "headless"
-    and #vim.api.nvim_get_runtime_file("lua/agent-poke/targets/" .. agent .. ".lua", false) > 0 then
-    return { agent }
-  end
+  return names
 end
 
 ---@param opts? table
@@ -95,6 +92,10 @@ function M.setup(opts)
       vim.log.levels.ERROR
     )
     opts.headless.agent = nil
+  end
+  if opts.agent ~= nil then
+    notify('the `agent` option is deprecated; use `targets` to enable adapters (the background agent is always on)',
+      vim.log.levels.WARN)
   end
   local targets = opts.targets
   opts.targets = nil
